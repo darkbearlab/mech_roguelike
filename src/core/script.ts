@@ -1,9 +1,10 @@
 /**
  * 自動單位的腳本：引擎在它們的階段直接照這裡走完，不等輸入。
  *
- * 目前只給靶用（固定靶、巡邏的靶機）。之後的敵人 AI 也從這裡接 ——
- * 規劃移動用的是 nav.ts 的 planAccel，跟玩家、bot 共用同一套移動規則，不走捷徑。
+ * 靶（固定靶、巡邏的靶機）在這裡；敵機（DUEL）的腦袋在 ai.ts。
+ * 規劃移動用的都是 nav.ts 的 planAccel，跟玩家、bot 共用同一套移動規則，不走捷徑。
  */
+import { duelAccel } from './ai';
 import { dirToward, hexDist } from './hex';
 import type { Dir } from './hex';
 import { planAccel } from './nav';
@@ -19,6 +20,7 @@ function patrolGoal(u: Unit): Unit['pos'] | null {
 
 /** 加速宣告。 */
 export function scriptAccel(s: GameState, u: Unit): AccelOrder {
+  if (u.script?.kind === 'DUEL') return duelAccel(s, u);
   const goal = patrolGoal(u);
   if (!goal || u.shutdown > 0) return null;
   return planAccel(s, u.id, goal, { depth: 2, stop: false });

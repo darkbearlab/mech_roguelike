@@ -52,19 +52,23 @@ export interface Unit {
 }
 
 /**
- * 自動單位的腳本（目前只給靶用；之後的敵人 AI 也從這裡接）。
+ * 自動單位的腳本。
  * - IDLE：不動
  * - PATROL：依序往每個巡邏點開，到了（1 格內）就換下一個，繞圈
+ * - DUEL：敵機（ai.ts）—— 跟玩家用同一套規則移動、射擊
  */
 export type Script =
   | { kind: 'IDLE' }
-  | { kind: 'PATROL'; points: Hex[]; next: number };
+  | { kind: 'PATROL'; points: Hex[]; next: number }
+  | { kind: 'DUEL' };
 
-/** 玩家這一局的射擊紀錄。 */
+/** 這一局的射擊紀錄：玩家打出去的，與敵方打過來的。 */
 export interface Stats {
   shots: number;
   hits: number;
   kills: number;
+  enemyShots: number;
+  enemyHits: number;
 }
 
 /**

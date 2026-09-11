@@ -29,6 +29,8 @@ export interface HudView {
   weaponName: string | null;
   ammo: number;
   magazine: number;
+  hp: number;
+  hpMax: number;
   ap: number;
   quota: number;
   debt: number;
@@ -74,6 +76,12 @@ export class Hud {
     const debt = '▮'.repeat(v.debt) + '▯'.repeat(Math.max(0, v.debtCap - v.debt));
     $('hud-ap').innerHTML = `<span class="ap-pips">AP ${pips.join('')}</span>`
       + `<span class="debt${v.debt > 0 ? ' on' : ''}">債 ${debt}</span>`;
+    // 耐久：之後會搬到左儀表板（部位損傷）；現在先一個數字
+    const hp = $('hud-hp');
+    hp.textContent = `耐久 ${v.hp}`;
+    hp.classList.toggle('hurt', v.hp < v.hpMax);
+    hp.classList.toggle('low', v.hp <= v.hpMax * 0.3);
+
     const ammo = $('hud-ammo');
     ammo.textContent = v.weaponName === null ? '彈 —' : `${v.weaponName} ${v.ammo}/${v.magazine}`;
     ammo.classList.toggle('empty', v.weaponName !== null && v.ammo === 0);

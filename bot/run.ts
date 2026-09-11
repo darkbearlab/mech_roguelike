@@ -6,8 +6,8 @@
  *   npm run bot -- --chassis jt1        只跑一台
  *   npm run bot -- --json               另存 bot/out/baseline-<時間>.json
  *
- * 試驗場只量移動（勝率先印 —，有敵人 AI 之後由同一支程式填上）；有靶的跑道（射擊場）量命中率與擊毀數，
- * 每台跑 --runs 個種子取總和。
+ * 試驗場只量移動；有靶的跑道（射擊場）量命中率與擊毀數，每台跑 --runs 個種子取總和；
+ * 決鬥場跑「你開的 × 對手」每一組 --runs 場，兩邊用同一顆 AI（core/ai.ts），印勝率矩陣。
  */
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { parseArgs } from 'node:util';
@@ -17,6 +17,8 @@ import { driveProfile } from '../src/core/movement';
 import { RULES, pilotChassis } from '../src/core/rules';
 import { runCourse } from './course';
 import type { CourseResult } from './course';
+import { runDuel } from './duel';
+import type { DuelResult } from './duel';
 import { MAX_DIST, MIN_DIST, runOne } from './match';
 import type { RunResult } from './match';
 
@@ -84,7 +86,7 @@ for (const id of ids) {
     pad('—', 5), pad('—', 6),
   );
 }
-console.log('\n（平均回合與格/回合只算抵達的場次；複合機的自動駕駛不切換驅動；試驗場沒有靶，命中率看下面的射擊場。）');
+console.log('\n（平均回合與格/回合只算抵達的場次；複合機的自動駕駛不切換驅動；試驗場沒有靶也沒有敵人 —— 命中率看射擊場、勝率看決鬥場。）');
 
 // ---------------------------------------------------------------- 情境：跑道
 
@@ -103,8 +105,8 @@ for (const rawCourse of RAW_MAPS.filter((m) => m.course)) {
   courses.push({ map: cmap.id, results });
   console.log(`\n情境：${cmap.name}（${cmap.id}，${cmap.course!.checkpoints.length} 個檢查點${hasTargets ? `，${seeds} 個種子` : ''}）`);
   console.log(hasTargets
-    ? '機體       完賽率  平均回合  熱量峰值  命中率        擊毀'
-    : '機體       完賽  回合  熱量峰值  撞擊  各檢查點通過的回合');
+    ? '機體       完賽率  平均回合  熱量峰值  操作/回合  命中率        擊毀'
+    : '機體       完賽  回合  熱量峰值  撞擊  操作/回合  各檢查點通過的回合');
   for (const r of results) {
     if (hasTargets) {
       const done = r.all.filter((x) => x.finished);
@@ -113,6 +115,7 @@ for (const rawCourse of RAW_MAPS.filter((m) => m.course)) {
         pad(`${done.length}/${r.all.length}`, 6),
         pad(done.length ? avg(done, (x) => x.turns).toFixed(1) : '—', 8),
         pad(Math.max(...r.all.map((x) => x.heatPeak)), 8),
+        pad(avg(r.all, (x) => x.inputs / x.turns).toFixed(1), 9),
         pad(r.shots ? `${((r.hits / r.shots) * 100).toFixed(0)}%（${r.hits}/${r.shots}）` : '—', 12),
         pad(`${r.kills}/${r.targets}`, 8),
       );
@@ -120,16 +123,54 @@ for (const rawCourse of RAW_MAPS.filter((m) => m.course)) {
       console.log(
         `${RULES.chassis[r.chassis].name.padEnd(9)}`,
         pad(r.finished ? '✓' : '✗', 4), pad(r.finished ? r.turns : '—', 5),
-        pad(r.heatPeak, 8), pad(r.collisions, 5), ' ', r.splits.join(' '),
+        pad(r.heatPeak, 8), pad(r.collisions, 5), pad((r.inputs / r.turns).toFixed(1), 9), ' ', r.splits.join(' '),
       );
     }
   }
 }
 console.log('\n（跑道固定、自動駕駛只用玩家能用的指令、擲骰用固定種子 —— 同一份規則永遠跑出同一個結果。）');
+console.log('（操作/回合 = 左盤點幾下 + 確認 + 右盤每個行動，待機也算一下。）');
+
+// ---------------------------------------------------------------- 情境：決鬥
+
+const duels: { map: string; results: DuelResult[] }[] = [];
+for (const rawDuel of RAW_MAPS.filter((m) => m.units?.some((u) => u.ai === 'DUEL'))) {
+  const dmap = loadMap(RULES, rawDuel);
+  const rivals = pilotChassis(RULES).map((c) => c.id);
+  const results: DuelResult[] = [];
+  console.log(`\n情境：${dmap.name}（${dmap.id}，每組 ${runs} 個種子；列 = 你開的、欄 = 對手；兩邊用同一顆 AI，你先手）`);
+  console.log('你＼對手   ' + rivals.map((e) => pad(RULES.chassis[e].name.split(' ')[0], 7)).join(''));
+  for (const p of ids) {
+    const cells: string[] = [];
+    for (const e of rivals) {
+      const rs = Array.from({ length: runs }, (_, i) => runDuel(RULES, dmap, p, e, seed0 + i));
+      results.push(...rs);
+      cells.push(pad(((rs.filter((r) => r.winner === 'PLAYER').length / rs.length) * 100).toFixed(0) + '%', 7));
+    }
+    console.log(`${RULES.chassis[p].name.padEnd(9)}`, cells.join(''));
+  }
+  console.log('\n機體       勝率  和局  平均回合  命中率  被命中率  剩餘耐久  操作/回合');
+  for (const p of ids) {
+    const rs = results.filter((r) => r.chassis === p);
+    const rate = (a: number, b: number) => (b ? ((a / b) * 100).toFixed(0) + '%' : '—');
+    const sum = (f: (r: DuelResult) => number) => rs.reduce((a, r) => a + f(r), 0);
+    console.log(
+      `${RULES.chassis[p].name.padEnd(9)}`,
+      pad(rate(rs.filter((r) => r.winner === 'PLAYER').length, rs.length), 5),
+      pad(rs.filter((r) => r.winner === 'DRAW').length, 5),
+      pad(avg(rs, (r) => r.turns).toFixed(1), 8),
+      pad(rate(sum((r) => r.hits), sum((r) => r.shots)), 7),
+      pad(rate(sum((r) => r.enemyHits), sum((r) => r.enemyShots)), 8),
+      pad(avg(rs, (r) => r.hpLeft).toFixed(0), 8),
+      pad(avg(rs, (r) => r.inputs / r.turns).toFixed(1), 9),
+    );
+  }
+  duels.push({ map: dmap.id, results });
+}
 
 if (values.json) {
   mkdirSync('bot/out', { recursive: true });
   const path = `bot/out/baseline-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
-  writeFileSync(path, JSON.stringify({ map: map.id, runs, seed: seed0, maxTurns, results: all, courses }, null, 1));
+  writeFileSync(path, JSON.stringify({ map: map.id, runs, seed: seed0, maxTurns, results: all, courses, duels }, null, 1));
   console.log('已寫入 ' + path);
 }

@@ -244,6 +244,30 @@ button {
   font-weight: 700;
 }
 
+#hud-hp {
+  color: #7dff9a;
+  font-variant-numeric: tabular-nums;
+}
+
+#hud-hp.hurt {
+  color: var(--warn);
+}
+
+#hud-hp.low {
+  color: var(--bad);
+  font-weight: 700;
+}
+
+/* 決鬥輸了 */
+.course-bar.lost {
+  border-color: var(--bad);
+  background: rgba(50, 20, 20, 0.7);
+}
+
+.course-bar.lost b {
+  color: var(--bad);
+}
+
 .hud-tools {
   display: flex;
   flex-direction: column;

@@ -15,7 +15,8 @@
  *   - 透支：行動照常結算，然後結束，不夠的部分從下一個階段的配額扣
  *   - 過熱停機
  *
- * 自動單位（control = SCRIPT，目前是靶）的階段由引擎照腳本直接走完，不等指令。
+ * 自動單位（control = SCRIPT：靶與敵機）的階段由引擎照腳本直接走完，不等指令。
+ * 敵機（腳本 DUEL）的行動由 ai.ts 一個一個挑，走的是和玩家同一段 checkLegal / perform。
  */
 import { shotCheck, weaponOf } from './combat';
 import { advanceCourse, hooksOf, newProgress } from './course';
@@ -28,6 +29,7 @@ import { accelHeat, accelLegality, driveOf, resolveMotion, worldOf } from './mov
 import { ORDERS } from './order';
 import { createRng, nextFloat } from './rng';
 import type { Rules } from './rules';
+import { duelAction } from './ai';
 import { scriptAccel, scriptFacing } from './script';
 import type { AccelOrder, Command, GameEvent, GameState, Side, Step, Unit } from './state';
 import { activeUnit, currentStep, unitById } from './state';
@@ -114,7 +116,7 @@ export function newGame(rules: Rules, map: GameMap, setup: Setup): GameState {
     cursor: -1,
     rng: createRng(setup.seed),
     course: map.course ? newProgress() : null,
-    stats: { shots: 0, hits: 0, kills: 0 },
+    stats: { shots: 0, hits: 0, kills: 0, enemyShots: 0, enemyHits: 0 },
     over: null,
   };
   for (const sp of map.units) addScripted(s, sp);
@@ -226,13 +228,29 @@ export function applyCommand(s: GameState, cmd: Command): { state: GameState; ev
   const n = cloneState(s);
   const ev: GameEvent[] = [];
   const u = activeUnit(n)!;
-  const rules = n.rules;
 
-  switch (cmd.type) {
-    case 'ACCEL':
-      u.pendingAccel = cmd.order;
+  if (cmd.type === 'ACCEL') {
+    u.pendingAccel = cmd.order;
+    proceed(n, ev);
+  } else {
+    const reason = perform(n, u, cmd, legal, ev);
+    if (reason) {
+      endPhase(u, reason, ev);
       proceed(n, ev);
-      break;
+    }
+  }
+  return { state: n, events: ev };
+}
+
+type ActionCommand = Exclude<Command, { type: 'ACCEL' }>;
+
+/**
+ * 一個行動的效果（已經確認合法）。玩家的指令與敵機 AI 的指令都走這裡 —— 同一段程式碼，沒有捷徑。
+ * 不推進步驟；回傳這個行動之後階段要不要結束（原因），null = 繼續等下一個行動。
+ */
+function perform(n: GameState, u: Unit, cmd: ActionCommand, legal: Legal, ev: GameEvent[]): EndReason | null {
+  const rules = n.rules;
+  switch (cmd.type) {
     case 'TURN': {
       const p = turnPrice(rules, u);
       spendAp(u, p.ap);
@@ -243,7 +261,6 @@ export function applyCommand(s: GameState, cmd: Command): { state: GameState; ev
       u.speed = Math.max(0, u.speed - driveOf(rules, u).facingTurnSpeedLoss);
       ev.push({ type: 'TURNED', unitId: u.id, from, to: u.facing, speed: u.speed });
       heat(n, u, p.heat, ev);
-      afterAction(n, u, legal, ev);
       break;
     }
     case 'FIRE': {
@@ -256,12 +273,14 @@ export function applyCommand(s: GameState, cmd: Command): { state: GameState; ev
       const hit = nextFloat(n.rng) * 100 < chance;
       const mine = u.side === 'PLAYER';
       if (mine) n.stats.shots++;
+      else n.stats.enemyShots++;
       ev.push({
         type: 'FIRED', shooterId: u.id, targetId: target.id, hit, chance, damage: hit ? w.damage : 0,
         from: { ...u.pos }, to: { ...target.pos },
       });
       if (hit) {
         if (mine) n.stats.hits++;
+        else n.stats.enemyHits++;
         target.hp = Math.max(0, target.hp - w.damage);
         if (target.hp === 0) {
           target.alive = false;
@@ -270,7 +289,6 @@ export function applyCommand(s: GameState, cmd: Command): { state: GameState; ev
         }
       }
       heat(n, u, w.fire.heat, ev);
-      afterAction(n, u, legal, ev);
       break;
     }
     case 'RELOAD': {
@@ -279,7 +297,6 @@ export function applyCommand(s: GameState, cmd: Command): { state: GameState; ev
       u.ammo = w.magazine;
       ev.push({ type: 'RELOADED', unitId: u.id, ammo: u.ammo });
       heat(n, u, w.reload.heat, ev);
-      afterAction(n, u, legal, ev);
       break;
     }
     case 'COOL': {
@@ -287,7 +304,6 @@ export function applyCommand(s: GameState, cmd: Command): { state: GameState; ev
       spendAp(u, a.ap);
       heat(n, u, a.heat, ev);
       ev.push({ type: 'COOLED', unitId: u.id, heat: u.heat });
-      afterAction(n, u, legal, ev);
       break;
     }
     case 'SWITCH_DRIVE': {
@@ -299,16 +315,13 @@ export function applyCommand(s: GameState, cmd: Command): { state: GameState; ev
       u.speed = Math.min(u.speed, driveOf(rules, u).maxSpeed);
       ev.push({ type: 'DRIVE', unitId: u.id, drive: u.drive });
       heat(n, u, a.heat, ev);
-      afterAction(n, u, legal, ev);
       break;
     }
     case 'WAIT':
       ev.push({ type: 'WAITED', unitId: u.id });
-      endPhase(u, 'WAIT', ev);
-      proceed(n, ev);
-      break;
+      return 'WAIT';
   }
-  return { state: n, events: ev };
+  return phaseOver(u, legal);
 }
 
 /** rules 與 map 是不可變的參照，不跟著深複製。 */
@@ -367,6 +380,11 @@ function arrive(s: GameState, step: Step, ev: GameEvent[]): boolean {
       if (!u.alive) return true;
       if (u.shutdown > 0) {
         endPhase(u, 'SHUTDOWN', ev);
+        return true;
+      }
+      // 敵機：照 AI 行動（跟玩家同一套規則）
+      if (u.script?.kind === 'DUEL') {
+        runAi(s, u, ev);
         return true;
       }
       // 自動單位：巡邏的把機首轉向目標（靶機轉向免費），然後結束
@@ -464,14 +482,23 @@ function inOwnPhase(s: GameState, u: Unit): boolean {
 }
 
 /** 行動做完之後：過熱、透支、AP 用完，三者任一成立就結束這個階段。 */
-function afterAction(s: GameState, u: Unit, legal: Legal, ev: GameEvent[]): void {
+function phaseOver(u: Unit, legal: Legal): EndReason | null {
+  if (u.shutdown > 0) return 'SHUTDOWN';
+  if (legal.overdraft > 0) return 'OVERDRAFT';
+  if (legal.ap > 0 && u.ap <= 0) return 'AP_SPENT';
+  return null;
+}
+
+/** 敵機的行動階段：一直問 AI 下一個指令，照玩家同一套 checkLegal / perform 結算，直到階段結束。 */
+function runAi(s: GameState, u: Unit, ev: GameEvent[]): void {
   let reason: EndReason | null = null;
-  if (u.shutdown > 0) reason = 'SHUTDOWN';
-  else if (legal.overdraft > 0) reason = 'OVERDRAFT';
-  else if (legal.ap > 0 && u.ap <= 0) reason = 'AP_SPENT';
-  if (!reason) return;
-  endPhase(u, reason, ev);
-  proceed(s, ev);
+  // 一個階段最多就那幾個行動；上限只是保險，AI 出錯也不會卡死
+  for (let guard = 0; guard < 12 && !reason; guard++) {
+    const cmd = duelAction(s, u);
+    const legal = checkLegal(s, cmd);
+    reason = legal.ok ? perform(s, u, cmd as ActionCommand, legal, ev) : 'WAIT';
+  }
+  endPhase(u, reason ?? 'WAIT', ev);
 }
 
 /**

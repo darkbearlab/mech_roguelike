@@ -19,7 +19,7 @@ import { applyCommand, checkLegal, newGame, turnPrice } from '../core/engine';
 import type { Hex } from '../core/hex';
 import { hexDist, hexRound, sameHex } from '../core/hex';
 import type { GameMap } from '../core/map';
-import { cellAt, loadMap } from '../core/map';
+import { cellAt, duelists, loadMap, withUnitChassis } from '../core/map';
 import { accelLegality, driveOf, maxTaps, resolveMotion, worldOf } from '../core/movement';
 import type { MotionResult } from '../core/movement';
 import type { Rules, RulesPatch } from '../core/rules';
@@ -48,6 +48,8 @@ export interface GameOptions {
   seed: number;
   chassis: string;
   mapId: string;
+  /** 決鬥場的對手機體；null = 用地圖寫的。 */
+  rival: string | null;
 }
 
 const FUNC_LABEL: Record<PadKey, string> = {
@@ -78,6 +80,11 @@ export class Game {
   private bounds!: WorldBounds;
   private chassis: string;
   private mapId: string;
+  private rival: string | null;
+  /** 演出用的延遲提示（例如敵機的子彈飛到了才說「被擊中」）。重開時全部取消。 */
+  private timers: number[] = [];
+  /** 上一批事件的演出排到什麼時候結束（performance.now 的時間）。 */
+  private fxEnd = 0;
 
   private canvas = $('map') as HTMLCanvasElement;
   private ctx = this.canvas.getContext('2d')!;
@@ -107,6 +114,7 @@ export class Game {
   constructor(private opts: GameOptions) {
     this.chassis = opts.chassis;
     this.mapId = opts.mapId;
+    this.rival = opts.rival;
     this.pads = new Pads($('move-pad'), $('func-pad'), {
       tap: (rel) => this.tap(rel as RelDir),
       confirm: () => this.confirm(),
@@ -129,6 +137,13 @@ export class Game {
       },
       setMap: (id) => {
         this.mapId = id;
+        this.savePrefs();
+        this.rebuildRules();
+        this.restart();
+      },
+      rival: () => this.rivalId(),
+      setRival: (id) => {
+        this.rival = id;
         this.savePrefs();
         this.rebuildRules();
         this.restart();
@@ -157,6 +172,8 @@ export class Game {
     this.targetManual = false;
     this.motion.finish();
     this.fx.clear();
+    for (const t of this.timers) window.clearTimeout(t);
+    this.timers = [];
     this.pads.buildFunc(this.cockpit().pad);
     this.refresh();
     // 開局時第一個檢查點就是目標：它的 ACTIVATE 鉤子在這裡發（之後的由引擎隨事件發出）
@@ -167,11 +184,26 @@ export class Game {
     this.rules = withPatch(RULES, this.patch);
     const raw = rawMapById(this.mapId) ?? rawMapById('proving_ground')!;
     this.map = loadMap(this.rules, raw);
+    // 決鬥場：換成選的對手
+    const rivalUnit = duelists(this.map)[0];
+    if (rivalUnit && this.rival) this.map = withUnitChassis(this.rules, this.map, rivalUnit, this.rival);
     this.bounds = mapBounds(this.map);
   }
 
+  /** 這張圖的決鬥對手（機體 id）；不是決鬥場就是 null。 */
+  private rivalId(): string | null {
+    const id = duelists(this.map)[0];
+    if (!id) return null;
+    return this.map.units.find((u) => (u.id ?? u.chassis) === id)!.chassis;
+  }
+
   private savePrefs(): void {
-    savePrefs({ map: this.mapId, chassis: this.chassis });
+    savePrefs({ map: this.mapId, chassis: this.chassis, rival: this.rival ?? undefined });
+  }
+
+  /** 過一段時間再做（演出用）。重開時全部取消。 */
+  private later(ms: number, f: () => void): void {
+    this.timers.push(window.setTimeout(f, Math.max(0, ms)));
   }
 
   /** 換一份規則但保留當下的局面 —— 調完參數可以接著開，不必回到出生點。 */
@@ -221,12 +253,36 @@ export class Game {
       this.refresh();
       return;
     }
+    const wasOver = this.state.over !== null;
+    const before = this.me().hp;
     const { state, events } = applyCommand(this.state, cmd);
     this.motion.finish();
     this.state = state;
     if (cmd.type === 'ACCEL' && UI.camera.recenterAfterMove) this.pan = { x: 0, y: 0 };
-    this.present(events);
+    this.present(events, before);
+    if (!wasOver && this.state.over && !this.map.course) this.result();
     this.refresh();
+  }
+
+  /** 決鬥之類沒有跑道的地圖分出勝負（跑道的完賽由 COURSE_DONE 說）。勝場記最少回合。 */
+  private result(): void {
+    const round = this.state.round;
+    const win = this.state.over!.winner === 'PLAYER';
+    let text = `💥 被擊毀（第 ${round} 回合）。按「重來」再打一次，或在 ⚙ 換機體、換對手`;
+    if (win) {
+      const key = this.recordKey();
+      const best = bestOf(key, this.chassis);
+      const record = recordFinish(key, this.chassis, round);
+      text = `🏆 勝利：第 ${round} 回合擊毀敵機` + (record && best !== null ? `（新紀錄，原本 ${best} 回合）` : '');
+    }
+    // 等最後那一槍的演出播完才說
+    this.later(this.fxEnd - performance.now(), () => this.hud.toast(text, win ? 'info' : 'bad', 5000));
+  }
+
+  /** 最佳紀錄的鍵：決鬥場連同對手一起記（打不同對手的回合數不能比）。 */
+  private recordKey(): string {
+    const rival = this.rivalId();
+    return rival ? `${this.mapId}@${rival}` : this.mapId;
   }
 
   private pressFunc(k: PadKey): void {
@@ -324,17 +380,29 @@ export class Game {
     return ` · 擊毀 ${n.killed}／${n.total} · 命中 ${st.hits}／${st.shots}`;
   }
 
-  /** 事件 → 動畫與提示。開槍之後的演出排在曳光之後（t0 往後推），看得出先後。 */
-  private present(events: GameEvent[]): void {
+  /**
+   * 事件 → 動畫與提示。同一批事件照順序一段一段播（busy = 排到哪個時間了）：
+   * 你開槍 → 敵機移動 → 敵機轉向 → 敵機開槍，看得出先後。
+   * 跟演出時間點有關的提示（被擊中）也等到那一刻才跳。
+   * @param hpBefore 這一批之前玩家的耐久（被連打時逐發算出剩多少）
+   */
+  private present(events: GameEvent[], hpBefore: number): void {
     const now = performance.now();
     const a = UI.animation;
-    let t0 = now;
+    let busy = now;
+    let hp = hpBefore;
+    const hpMax = this.rules.chassis[this.me().chassis].hp;
     for (const e of events) {
       switch (e.type) {
         case 'MOVED': {
           const hexes = e.path.length - 1;
           const bump = events.some((x) => x.type === 'COLLIDED' && x.unitId === e.unitId);
-          if (hexes > 0) this.motion.move(e.unitId, e.from, e.to, t0, Math.min(a.maxMoveMs, hexes * a.msPerHex), bump);
+          if (hexes > 0) {
+            const dur = Math.min(a.maxMoveMs, hexes * a.msPerHex);
+            this.motion.move(e.unitId, e.from, e.to, busy, dur, bump);
+            // 自己的位移不擋後面的東西（同一批裡只剩檢查點之類的提示）；別人的要播完才輪到下一段
+            if (e.unitId !== 'player') busy += dur;
+          }
           if (e.unitId === 'player' && hexes > 0) {
             this.trail.push(e.from);
             if (this.trail.length > UI.preview.trailLength) this.trail.shift();
@@ -342,17 +410,28 @@ export class Game {
           break;
         }
         case 'TURNED':
-          this.motion.turn(e.unitId, dirAngle(e.from), dirAngle(e.to), t0, a.turnMs);
+          this.motion.turn(e.unitId, dirAngle(e.from), dirAngle(e.to), busy, a.turnMs);
+          if (e.unitId !== 'player') busy += a.turnMs;
           break;
-        case 'FIRED':
-          this.fx.shot(e.from, e.to, e.hit, t0, a.shotMs);
-          this.fx.float(e.to, e.hit ? `−${e.damage}` : '未命中', e.hit ? '#ffe08a' : '#cfd8e3', t0 + a.shotMs * 0.35, a.floatMs);
-          t0 += a.shotMs;
+        case 'FIRED': {
+          const impact = busy + a.shotMs * 0.35;
+          this.fx.shot(e.from, e.to, e.hit, busy, a.shotMs);
+          this.fx.float(e.to, e.hit ? `−${e.damage}` : '未命中', e.hit ? '#ffe08a' : '#cfd8e3', impact, a.floatMs);
+          if (e.targetId === 'player') {
+            hp -= e.damage;
+            const text = e.hit
+              ? `被擊中 −${e.damage}（對方命中率 ${e.chance}%）· 耐久 ${hp}／${hpMax}`
+              : `對方沒打中（命中率 ${e.chance}%）`;
+            this.later(impact - now, () => this.hud.toast(text, e.hit ? 'bad' : 'info'));
+          }
+          busy += a.shotMs;
           break;
+        }
         case 'DESTROYED': {
           const u = unitById(this.state, e.unitId)!;
-          this.fx.float(u.pos, '擊毀', '#ff6b5a', t0, a.floatMs);
-          if (e.by === 'player') {
+          this.fx.float(u.pos, '擊毀', '#ff6b5a', busy, a.floatMs);
+          // 靶：報一下進度。敵機或自己被打爆 = 分出勝負，由 result() 說
+          if (e.by === 'player' && this.rules.chassis[u.chassis].role === 'TARGET') {
             const n = this.targetCount();
             this.hud.toast(`💥 擊毀${this.rules.chassis[u.chassis].name}（${n.killed}／${n.total}）`, 'info');
           }
@@ -364,7 +443,7 @@ export class Game {
         case 'SPAWNED': {
           // 不跳 toast：同一批裡通常還有檢查點的旁白，別蓋掉它
           const u = unitById(this.state, e.unitId)!;
-          this.fx.float(u.pos, '出現', '#ff6b5a', t0, a.floatMs * 1.5);
+          this.fx.float(u.pos, '出現', '#ff6b5a', busy, a.floatMs * 1.5);
           break;
         }
         case 'COLLIDED': {
@@ -406,6 +485,7 @@ export class Game {
           break;
       }
     }
+    this.fxEnd = busy;
   }
 
   /**
@@ -497,6 +577,8 @@ export class Game {
       weaponName: weapon?.name ?? null,
       ammo: u.ammo,
       magazine: weapon?.magazine ?? 0,
+      hp: u.hp,
+      hpMax: c.hp,
       ap: u.ap,
       quota: c.apQuota,
       debt: u.debt,
@@ -508,13 +590,15 @@ export class Game {
     this.refreshCourse();
   }
 
-  /** 跑道那一行：下一個檢查點與這一步的提示；跑完就顯示成績。 */
+  /** 跑道那一行：下一個檢查點與這一步的提示；跑完就顯示成績。決鬥場顯示對手的耐久與勝負。 */
   private refreshCourse(): void {
     const bar = $('hud-course');
     const course = this.map.course;
     const p = this.state.course;
-    bar.classList.toggle('hidden', !course);
-    if (!course || !p) return;
+    bar.classList.toggle('hidden', !course && !this.map.brief);
+    bar.classList.remove('lost');
+    $('btn-course-restart').textContent = course ? '重跑' : '重來';
+    if (!course || !p) return this.refreshBrief();
     const best = bestOf(this.mapId, this.chassis);
     const n = this.targetCount();
     bar.classList.toggle('done', p.done !== null);
@@ -527,6 +611,28 @@ export class Game {
     $('course-step').textContent = `${p.next + 1}／${course.checkpoints.length} ${cp.type === 'STOP' ? '停車' : '通過'}`
       + (n.total > 0 ? ` · 🎯${n.killed}／${n.total}` : '');
     $('course-hint').textContent = cp.hint + (best !== null && p.next === 0 ? `（最佳 ${best} 回合）` : '');
+  }
+
+  /** 沒有跑道、有說明的地圖（決鬥場）：對手的耐久、說明；分出勝負就顯示結果。 */
+  private refreshBrief(): void {
+    const brief = this.map.brief;
+    if (!brief) return;
+    const bar = $('hud-course');
+    const over = this.state.over;
+    const rivals = this.state.units.filter((u) => u.side === 'ENEMY' && this.rules.chassis[u.chassis].role !== 'TARGET');
+    const best = bestOf(this.recordKey(), this.chassis);
+    bar.classList.toggle('done', over?.winner === 'PLAYER');
+    bar.classList.toggle('lost', over !== null && over.winner !== 'PLAYER');
+    const vs = rivals.map((r) => `${this.rules.chassis[r.chassis].name} 耐久 ${r.hp}`).join('、');
+    if (over) {
+      $('course-step').textContent = over.winner === 'PLAYER' ? `🏆 勝利 第 ${this.state.round} 回合` : `💥 被擊毀 第 ${this.state.round} 回合`;
+      $('course-hint').textContent = `${this.rules.chassis[this.chassis].name} 對 ${rivals.map((r) => this.rules.chassis[r.chassis].name).join('、')}`
+        + `${best !== null ? `・最佳 ${best} 回合` : ''} · 命中 ${this.state.stats.hits}／${this.state.stats.shots}`
+        + ` · 被命中 ${this.state.stats.enemyHits}／${this.state.stats.enemyShots}。按「重來」再打一次，或在 ⚙ 換機體、換對手。`;
+      return;
+    }
+    $('course-step').textContent = `對手 ${vs}`;
+    $('course-hint').textContent = brief + (best !== null ? `（最佳 ${best} 回合）` : '');
   }
 
   /** 中間確認鍵上寫這回合會變成什麼：「3速 → 轉60° −1 +2 → 4速↖」。 */
@@ -616,9 +722,17 @@ export class Game {
 
   private targetView(): TargetView | null {
     if (this.state.over) return null;
+    const me = this.shooter();
     const chance = new Map<string, number>();
-    for (const t of targetsFor(this.state, this.shooter())) chance.set(t.unit.id, t.check.chance);
-    return { selected: this.target, chance };
+    for (const t of targetsFor(this.state, me)) chance.set(t.unit.id, t.check.chance);
+    // 威脅：有武器的對手現在打你的命中率（取最高）。用它目前的位置與速度估 —— 它在你之後才動，所以只是參考
+    let threat: number | null = null;
+    for (const e of this.state.units) {
+      if (!e.alive || e.side === me.side || !weaponOf(this.rules, e)) continue;
+      const c = shotCheck(this.state, e, me);
+      if (c.ok) threat = Math.max(threat ?? 0, c.chance);
+    }
+    return { selected: this.target, chance, threat, threatAt: me.pos };
   }
 
   // ---------------------------------------------------------------- 輸入

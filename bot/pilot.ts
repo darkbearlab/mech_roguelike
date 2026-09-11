@@ -20,6 +20,8 @@ export interface PilotTurn {
   arrivedAfterMove: boolean;
   /** 這一回合中途的最高熱量（世界階段散熱之前）。 */
   heatPeak: number;
+  /** 玩家這回合按了幾下：左盤點數 + 確認 + 右盤每個行動（待機也算）。 */
+  inputs: number;
 }
 
 /** 命中率至少這麼高才開槍（點數）。 */
@@ -38,9 +40,11 @@ function goalOf(g: Goal, s: GameState): { at: Hex; stop: boolean } {
 export function pilotTurn(s0: GameState, unitId: string, goal: Goal, isThere: (s: GameState) => boolean): PilotTurn {
   const events: GameEvent[] = [];
   let heatPeak = unitById(s0, unitId)!.heat;
+  let inputs = 0;
   const step = (st: GameState, cmd: Command): GameState => {
     const r = applyCommand(st, cmd);
     if (r.state === st) throw new Error('自動駕駛送出了非法指令：' + JSON.stringify(cmd));
+    inputs += cmd.type === 'ACCEL' ? (cmd.order?.taps ?? 0) + 1 : 1;
     events.push(...r.events);
     // 結束階段會一路走過世界階段（被動散熱），所以只記加速與行動當下的熱量
     if (cmd.type !== 'WAIT') heatPeak = Math.max(heatPeak, unitById(r.state, unitId)!.heat);
@@ -48,7 +52,7 @@ export function pilotTurn(s0: GameState, unitId: string, goal: Goal, isThere: (s
   };
   const g0 = goalOf(goal, s0);
   let s = step(s0, { type: 'ACCEL', order: planAccel(s0, unitId, g0.at, { stop: g0.stop }) });
-  if (isThere(s)) return { state: s, events, arrivedAfterMove: true, heatPeak };
+  if (isThere(s)) return { state: s, events, arrivedAfterMove: true, heatPeak, inputs };
 
   // 右盤：有靶打得中就打；打光了就裝填；太熱就散熱；然後把機首轉向目標 —— 能點幾下是看機首的。
   // 除了裝填，只做不透支的事：配額 1 時裝填（2 AP）一定透支，不允許就永遠裝不了。
@@ -80,5 +84,5 @@ export function pilotTurn(s0: GameState, unitId: string, goal: Goal, isThere: (s
     s = step(s, { type: 'TURN', delta });
   }
   if (acting()) s = step(s, { type: 'WAIT' });
-  return { state: s, events, arrivedAfterMove: false, heatPeak };
+  return { state: s, events, arrivedAfterMove: false, heatPeak, inputs };
 }

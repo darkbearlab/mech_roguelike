@@ -51,11 +51,15 @@ export interface ArcCell {
   optimal: boolean;
 }
 
-/** 目標：誰被選中、每個打得到的目標頭上寫多少命中率。 */
+/** 目標：誰被選中、每個打得到的目標頭上寫多少命中率；以及對手打你的命中率（威脅）。 */
 export interface TargetView {
   selected: string | null;
   /** unitId → 命中率；不在表裡 = 現在打不到。 */
   chance: Map<string, number>;
+  /** 對手現在打你的最高命中率；null = 沒有人打得到你。 */
+  threat: number | null;
+  /** 威脅標在哪一格（加速階段是預測的落點）。 */
+  threatAt: Hex;
 }
 
 export interface Scene {
@@ -124,6 +128,7 @@ const C = {
   wreck: 'rgba(255,107,90,0.35)',
   tracerHit: '#ffe08a',
   tracerMiss: 'rgba(255,255,255,0.55)',
+  threat: '#ff7b6b',
 } as const;
 
 function tracePoly(ctx: CanvasRenderingContext2D, pts: Pt[]): void {
@@ -516,6 +521,16 @@ function drawTargets(ctx: CanvasRenderingContext2D, sc: Scene, tv: TargetView): 
       ctx.fillStyle = sel ? C.reticle : C.reticleDim;
       ctx.fillText(`${chance}%`, c.x, c.y - s * 0.62);
     }
+  }
+  // 威脅：紅字標在自己（或預測落點）上方 —— 開快比較難被打中，這個數字會跟著變
+  if (tv.threat !== null) {
+    const c = toScreen(cam, tv.threatAt);
+    ctx.font = `bold ${Math.round(s * 0.4)}px system-ui, sans-serif`;
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = 'rgba(0,0,0,0.75)';
+    ctx.strokeText(`⚠${tv.threat}%`, c.x, c.y - s * 0.62);
+    ctx.fillStyle = C.threat;
+    ctx.fillText(`⚠${tv.threat}%`, c.x, c.y - s * 0.62);
   }
 }
 

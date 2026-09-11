@@ -25,6 +25,8 @@ export interface Preview {
   pos: Hex;
   heading: Dir;
   speed: number;
+  /** 轉完之後的機首（左盤選的轉向）。 */
+  facing: Dir;
   collision: Hex | null;
   /** 選了方向（亮）還是只是「不點會怎樣」（暗）。 */
   selected: boolean;
@@ -271,6 +273,15 @@ function drawPreview(ctx: CanvasRenderingContext2D, cam: Camera, p: Preview): vo
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillText(String(p.speed), c.x, c.y + 1);
+    // 落點的機首（轉完之後）：圈外一個小三角
+    const f = dirAngle(p.facing);
+    const r = s * 0.42;
+    ctx.beginPath();
+    ctx.moveTo(c.x + Math.cos(f) * r * 1.5, c.y + Math.sin(f) * r * 1.5);
+    ctx.lineTo(c.x + Math.cos(f + 0.35) * r * 1.08, c.y + Math.sin(f + 0.35) * r * 1.08);
+    ctx.lineTo(c.x + Math.cos(f - 0.35) * r * 1.08, c.y + Math.sin(f - 0.35) * r * 1.08);
+    ctx.closePath();
+    ctx.fill();
   }
 }
 

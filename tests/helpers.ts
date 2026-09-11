@@ -69,8 +69,9 @@ export const accel = (rel: RelDir, taps: number): Command => ({ type: 'ACCEL', o
 /** 左盤：什麼都不點，直接確認。 */
 export const COAST: Command = { type: 'ACCEL', order: null };
 export const WAIT: Command = { type: 'WAIT' };
-export const TURN_R: Command = { type: 'TURN', delta: 1 };
-export const TURN_L: Command = { type: 'TURN', delta: -1 };
+/** 左盤的機動宣告：先轉 turn 面（正 = 右），再往相對新機首的 rel 方向點 taps 下（省略 = 不加速）。 */
+export const maneuver = (turn: number, rel?: RelDir, taps?: number): Command =>
+  ({ type: 'ACCEL', order: rel === undefined ? null : { rel, taps: taps ?? 1 }, turn });
 
 /** 直接改複製品上的欄位（模擬第 5 步以後才會有的傷害、外部加熱等）。 */
 export function patch(s: GameState, f: (s: GameState) => void): GameState {

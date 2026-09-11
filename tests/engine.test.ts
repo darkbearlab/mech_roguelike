@@ -1,12 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { applyCommand, checkLegal, judge, newGame, turnPrice } from '../src/core/engine';
+import { applyCommand, checkLegal, judge, newGame, planTurn, turnPrice } from '../src/core/engine';
 import { DIR_VEC, add, hexDist, scale } from '../src/core/hex';
 import type { Dir } from '../src/core/hex';
 import { RULES } from '../src/core/rules';
-import type { GameEvent } from '../src/core/state';
+import type { GameEvent, GameState } from '../src/core/state';
 import { activeUnit, currentStep, playerUnit, unitAt, unitById } from '../src/core/state';
 import {
-  COAST, TURN_L, TURN_R, WAIT, accel, customRules, flatMap, game, patch, player, run,
+  COAST, WAIT, accel, customRules, flatMap, game, maneuver, patch, player, run,
 } from './helpers';
 
 const ends = (ev: GameEvent[]) => ev.filter((e) => e.type === 'PHASE_END').map((e) => (e as { reason: string }).reason);
@@ -68,7 +68,7 @@ describe('開局與回合結構', () => {
   it('非法指令回傳同一個狀態物件，並帶著理由', () => {
     const s = game('jt1');
     expect(applyCommand(s, WAIT).state).toBe(s);
-    expect(checkLegal(s, TURN_R).reason).toContain('先在左盤確認加速');
+    expect(checkLegal(s, { type: 'COOL' }).reason).toContain('先在左盤確認機動');
     expect(checkLegal(s, accel(2, 1)).reason).toContain('推不動');
     const acted = run(s, [COAST]).state;
     expect(checkLegal(acted, COAST).reason).toContain('已經宣告過');
@@ -81,22 +81,20 @@ describe('開局與回合結構', () => {
 });
 
 describe('設計者的範例，整段在引擎裡跑一次', () => {
-  it('3 速往北 → 左前點 2 → 4 速往西北 → 右盤左轉（−1 速）→ 往後點 3 → 靜止', () => {
+  it('3 速往北 → 左前點 2 → 4 速往西北 → 左轉一面（−1 速）＋往後點 3 → 靜止', () => {
     let s = game('jt1', { map: flatMap(31, 31) });
     const start = player(s).pos;
     s = run(s, [accel(0, 3), WAIT]).state;
     expect(player(s)).toMatchObject({ heading: 0, speed: 3, pos: add(start, scale(DIR_VEC[0], 3)) });
 
-    s = run(s, [accel(5, 2)]).state;
+    s = run(s, [accel(5, 2), WAIT]).state;
     expect(player(s)).toMatchObject({ heading: 5, speed: 4, facing: 0 });
     const afterVeer = player(s).pos;
 
-    s = run(s, [TURN_L]).state;
-    expect(player(s)).toMatchObject({ facing: 5, speed: 3, ap: 1 });   // 噴射轉向免費 AP，但吃 1 速
-    s = run(s, [WAIT]).state;
-
-    const r = run(s, [accel(3, 3)]);
-    expect(player(r.state)).toMatchObject({ speed: 0, heading: 5, pos: afterVeer });
+    // 轉向在移動之前、跟加速一起宣告：先左轉（噴射轉向不收 AP，但吃 1 速），再往新機首的正後方點 3
+    const r = run(s, [maneuver(-1, 3, 3)]);
+    expect(r.events).toContainEqual({ type: 'TURNED', unitId: 'player', from: 0, to: 5, speed: 3 });
+    expect(player(r.state)).toMatchObject({ facing: 5, speed: 0, heading: 5, pos: afterVeer, ap: 1 });
     expect(r.events.find((e) => e.type === 'MOVED')).toMatchObject({ path: [afterVeer] });
   });
 
@@ -114,41 +112,60 @@ describe('設計者的範例，整段在引擎裡跑一次', () => {
   });
 });
 
-describe('右盤轉向', () => {
-  it('步行：每回合第一面免費；第二面 1 AP，AP 用完就自動結束這個階段', () => {
-    let s = run(game('wk1'), [COAST]).state;
+describe('左盤轉向（設計者 2026-09-11：轉向在移動之前、跟加速一起宣告）', () => {
+  it('步行：每回合第一面免費；第二面 1 AP —— AP 花在轉向上，行動階段就直接跳過', () => {
+    const s = game('wk1');
     expect(turnPrice(RULES, player(s))).toEqual({ ap: 0, heat: 0 });
-    s = run(s, [TURN_R]).state;
-    expect(player(s)).toMatchObject({ facing: 1, ap: 1, facesTurned: 1 });
-    expect(currentStep(s)?.kind).toBe('ACT');
-    const r = run(s, [TURN_R]);
-    expect(player(r.state).facing).toBe(2);
+    expect(checkLegal(s, maneuver(1))).toMatchObject({ ok: true, ap: 0 });
+    expect(checkLegal(s, maneuver(-2))).toMatchObject({ ok: true, ap: 1 });
+    expect(checkLegal(s, maneuver(3)).reason).toContain('AP 不夠');
+    const one = run(s, [maneuver(1)]).state;
+    expect(player(one)).toMatchObject({ facing: 1, ap: 1, facesTurned: 1 });
+    expect(currentStep(one)?.kind).toBe('ACT');
+    const r = run(s, [maneuver(-2)]);
+    expect(r.events.filter((e) => e.type === 'TURNED')).toHaveLength(2);
+    expect(player(r.state).facing).toBe(4);
     expect(ends(r.events)).toEqual(['AP_SPENT']);
     expect(r.state.round).toBe(2);
     expect(currentStep(r.state)?.kind).toBe('DECLARE');
   });
 
-  it('履帶：每一面都要 1 AP（配額 1 → 轉一面就結束）', () => {
-    const s = run(game('tk1'), [COAST]).state;
-    expect(checkLegal(s, TURN_R).ap).toBe(1);
-    const r = run(s, [TURN_R]);
+  it('加速方向是相對轉完之後的機首', () => {
+    const r = run(game('wk1'), [maneuver(1, 0, 1)]);
+    expect(player(r.state)).toMatchObject({ facing: 1, heading: 1, speed: 1 });
+  });
+
+  it('履帶：每一面都要 1 AP（配額 1 → 只轉得了一面，而且這回合就不能開火了）', () => {
+    const s = game('tk1');
+    expect(checkLegal(s, maneuver(1)).ap).toBe(1);
+    expect(checkLegal(s, maneuver(2)).reason).toContain('AP 不夠');
+    const r = run(s, [maneuver(1)]);
     expect(player(r.state).facing).toBe(1);
     expect(ends(r.events)).toEqual(['AP_SPENT']);
   });
 
-  it('噴射：轉向免費，但每一面吃 1 速（最低 0）', () => {
-    let s = run(game('jt1'), [accel(0, 2)]).state;
-    s = run(s, [TURN_R, TURN_R, TURN_R]).state;
-    expect(player(s)).toMatchObject({ facing: 3, speed: 0, ap: 1 });
-    expect(currentStep(s)?.kind).toBe('ACT');
+  it('噴射：轉向不收 AP，但每一面吃 1 速（最低 0）', () => {
+    const s = run(game('jt1'), [accel(0, 2), WAIT]).state;
+    const r = run(s, [maneuver(3)]);
+    expect(player(r.state)).toMatchObject({ facing: 3, speed: 0, ap: 1 });
+    expect(currentStep(r.state)?.kind).toBe('ACT');
   });
 
   it('免費額度每個階段重算', () => {
-    let s = run(game('wk1'), [COAST, TURN_L, WAIT, COAST]).state;
+    let s = run(game('wk1'), [maneuver(-1), WAIT]).state;
     expect(player(s).facing).toBe(5);
-    expect(turnPrice(RULES, player(s))).toEqual({ ap: 0, heat: 0 });
-    s = run(s, [TURN_L]).state;
+    expect(checkLegal(s, maneuver(-1)).ap).toBe(0);
+    s = run(s, [maneuver(-1)]).state;
     expect(player(s)).toMatchObject({ facing: 4, ap: 1 });
+  });
+
+  it('轉向的限制：一次最多半圈、要整數、停機中不能轉', () => {
+    const u = player(game('wk1'));
+    expect(planTurn(RULES, u, 4).reason).toContain('半圈');
+    expect(planTurn(RULES, u, 1.5).ok).toBe(false);
+    expect(planTurn(RULES, { ...u, shutdown: 1 }, 1).reason).toContain('停機');
+    expect(planTurn(RULES, { ...u, shutdown: 1 }, 0).ok).toBe(true);
+    expect(checkLegal(game('wk1'), maneuver(4)).reason).toContain('半圈');
   });
 });
 
@@ -188,11 +205,19 @@ describe('透支與 AP 用完', () => {
 
   it('剛好用完 AP 也結束；還有 AP 就繼續', () => {
     const quota2 = customRules((r) => { r.chassis.tk1.apQuota = 2; });
-    let s = run(game('tk1', { rules: quota2 }), [COAST]).state;
-    s = run(s, [TURN_R]).state;
-    expect(currentStep(s)?.kind).toBe('ACT');
-    const r = run(s, [TURN_R]);
+    const hot = (s: GameState) => patch(s, (n) => { n.units[0].heat = 60; });
+    // 配額 2：散熱一次（1 AP）還剩 1 → 繼續；再散熱一次 → 用完、結束
+    let s = hot(run(game('tk1', { rules: quota2 }), [COAST]).state);
+    let r = run(s, [{ type: 'COOL' }]);
+    expect(ends(r.events)).toEqual([]);
+    expect(currentStep(r.state)?.kind).toBe('ACT');
+    r = run(r.state, [{ type: 'COOL' }]);
     expect(ends(r.events)).toEqual(['AP_SPENT']);
+    // 履帶轉一面花 1 AP（在機動宣告裡），行動階段還剩 1
+    s = hot(run(game('tk1', { rules: quota2 }), [maneuver(1)]).state);
+    expect(currentStep(s)?.kind).toBe('ACT');
+    expect(player(s).ap).toBe(1);
+    expect(ends(run(s, [{ type: 'COOL' }]).events)).toEqual(['AP_SPENT']);
   });
 });
 
@@ -288,7 +313,7 @@ describe('選取器與可重現性', () => {
   });
 
   it('同一個種子、同一串指令 → 完全相同的狀態', () => {
-    const cmds = [accel(0, 1), WAIT, accel(1, 1), TURN_R, WAIT, accel(3, 1), WAIT, COAST, WAIT];
+    const cmds = [accel(0, 1), WAIT, accel(1, 1), WAIT, maneuver(1, 3, 1), WAIT, COAST, WAIT];
     const a = run(game('wk1', { seed: 7 }), cmds).state;
     const b = run(game('wk1', { seed: 7 }), cmds).state;
     expect(JSON.stringify({ ...a, rules: 0, map: 0 })).toBe(JSON.stringify({ ...b, rules: 0, map: 0 }));
@@ -297,14 +322,15 @@ describe('選取器與可重現性', () => {
   it('applyCommand 不改動傳入的狀態', () => {
     const s = game('jt1');
     const snap = JSON.stringify({ ...s, rules: 0, map: 0 });
-    run(s, [accel(0, 2), TURN_R, WAIT]);
+    run(s, [maneuver(1, 0, 2), WAIT]);
     expect(JSON.stringify({ ...s, rules: 0, map: 0 })).toBe(snap);
   });
 
   it('朝向與速度方向各自獨立：側滑', () => {
-    let s = run(game('jt1', { map: flatMap(41, 41) }), [accel(0, 3), TURN_R, TURN_R, WAIT]).state;
-    expect(player(s)).toMatchObject({ heading: 0, facing: 2 as Dir, speed: 1 });
-    s = run(s, [COAST]).state;
-    expect(player(s)).toMatchObject({ heading: 0, facing: 2, speed: 0 });
+    const s = run(game('jt1', { map: flatMap(41, 41) }), [accel(0, 3), WAIT]).state;
+    const before = player(s).pos;
+    // 右轉一面（−1 速）、不加速（−1 衰減）：機首朝東北，身體還是往北滑 1 格
+    const r = run(s, [maneuver(1)]);
+    expect(player(r.state)).toMatchObject({ heading: 0, facing: 1 as Dir, speed: 1, pos: add(before, DIR_VEC[0]) });
   });
 });

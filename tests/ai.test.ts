@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { duelAccel, duelAction, duelGoal, foeOf, tacticalCost } from '../src/core/ai';
-import { newGame } from '../src/core/engine';
+import { affordableTurn, duelAction, duelDeclare, duelGoal, foeOf, tacticalCost } from '../src/core/ai';
+import { newGame, planTurn } from '../src/core/engine';
 import type { Dir, Hex } from '../src/core/hex';
 import { hexDist } from '../src/core/hex';
 import { cellAt, duelists, loadMap, withUnitChassis } from '../src/core/map';
@@ -77,32 +77,60 @@ describe('往哪開', () => {
     expect(duelGoal(s, rival(s), player(s))).toEqual(player(s).pos);
   });
 
-  it('沒有對手就不加速；遠的時候照導航靠近', () => {
-    const s = arena({ row: 0 });
-    expect(duelAccel(patch(s, (n) => { n.units[0].alive = false; }), rival(s))).toBeNull();
+  it('沒有對手就不動；遠的時候機首轉向目標、照導航靠近', () => {
+    const s = arena({ row: 0, facing: 0 });   // 背對玩家、距離 10
+    expect(duelDeclare(patch(s, (n) => { n.units[0].alive = false; }), rival(s))).toEqual({ turn: 0, order: null });
+    const d = duelDeclare(s, rival(s));
+    // 步行只有第一面免費、配額 1：付得起兩面（第二面 1 AP）—— 還遠，打不到，AP 拿去轉向
+    expect(Math.abs(d.turn)).toBeGreaterThan(0);
     const before = hexDist(rival(s).pos, player(s).pos);
     const after = run(s, [COAST, WAIT]).state;
     expect(hexDist(rival(after).pos, player(after).pos)).toBeLessThan(before);
   });
 
-  it('近了：每個合法宣告推演一回合，挑分數最低的', () => {
+  it('近了：每個付得起的轉向 × 每個合法加速都推演一回合，挑分數最低的', () => {
     const s = arena();
-    const o = duelAccel(s, rival(s));
-    const all = allOrders(RULES, rival(s));
-    expect(all).toContainEqual(o);
-    const best = Math.min(...all.map((x) => tacticalCost(s, rival(s), player(s), x)));
-    expect(tacticalCost(s, rival(s), player(s), o)).toBe(best);
+    const d = duelDeclare(s, rival(s));
+    const plan = planTurn(RULES, rival(s), d.turn);
+    expect(plan.ok).toBe(true);
+    const all = allOrders(RULES, plan.unit);
+    expect(all).toContainEqual(d.order);
+    // 不轉的選項裡最好的，不會比選中的好
+    const bestNoTurn = Math.min(...allOrders(RULES, rival(s)).map((x) => tacticalCost(s, rival(s), player(s), x)));
+    expect(tacticalCost(s, plan.unit, player(s), d.order) + Math.abs(d.turn) * 0.05).toBeLessThanOrEqual(bestNoTurn);
   });
 
-  it('評分：移動完打不到（背對對手）扣分；撞上扣很多', () => {
-    const facing = arena();
-    const away = arena({ facing: 0 });
+  // 敵機的 AP 在它自己的階段開頭才補：在玩家的階段看它，要先照它的配額補上
+  const ready = (s: GameState) => patch(s, (n) => { n.units[1].ap = 1; });
+
+  it('近了、背對對手：先轉過去（這回合反正打不到，也要替下一回合擺好機首）', () => {
+    const s = ready(arena({ facing: 0 }));   // 在玩家正北 4 格、朝北 = 背對
+    const d = duelDeclare(s, rival(s));
+    const t = planTurn(RULES, rival(s), d.turn).unit;
+    expect(Math.abs(d.turn)).toBeGreaterThan(1);
+    expect([2, 3, 4]).toContain(t.facing);
+  });
+
+  it('評分：移動完打不到（背對對手、或 AP 花在轉向上）扣分；撞上扣很多', () => {
+    const facing = ready(arena());
+    const away = ready(arena({ facing: 0 }));
     // 同樣不加速：背對玩家的那台打不到，分數高
     expect(tacticalCost(away, rival(away), player(away), null)).toBeGreaterThan(tacticalCost(facing, rival(facing), player(facing), null));
+    // 轉向把 AP 花光（例如履帶）：面對玩家也沒得打
+    const broke = { ...rival(facing), ap: 0 };
+    expect(tacticalCost(facing, broke, player(facing), null)).toBeGreaterThan(tacticalCost(facing, rival(facing), player(facing), null));
     // 貼在玩家正前方、朝南往前推 = 撞上玩家
     const touching = arena({ row: 9 });
     const bump = tacticalCost(touching, rival(touching), player(touching), { rel: 0, taps: 1 });
     expect(bump).toBeGreaterThanOrEqual(12);
+  });
+
+  it('付得起幾面轉幾面', () => {
+    const s = arena({ chassis: 'tk1' });
+    // 履帶每面 1 AP、配額 1：想轉 3 面也只轉得了 1 面
+    expect(affordableTurn(s, player(s), 3)).toBe(1);
+    expect(affordableTurn(s, player(s), -2)).toBe(-1);
+    expect(affordableTurn(s, { ...player(s), ap: 0 }, 2)).toBe(0);
   });
 });
 
@@ -119,14 +147,10 @@ describe('行動（用玩家自己的行動階段測：AI 只透過 checkLegal �
     expect(duelAction(s, player(s))).toEqual({ type: 'WAIT' });
   });
 
-  it('對手在背後：免費的轉向馬上轉；要花 AP 的留到最後（先散熱）', () => {
-    // 步行：每回合第一面免費
-    const walker = act({ row: 14 });
-    expect(duelAction(walker, player(walker))).toMatchObject({ type: 'TURN' });
-    // 履帶：每一面都要 1 AP —— 沒別的事可做才轉
-    const tracked = act({ chassis: 'tk1', row: 14 });
-    expect(duelAction(tracked, player(tracked))).toMatchObject({ type: 'TURN' });
-    const hot = patch(tracked, (n) => { n.units[0].heat = 80; });
+  it('行動階段不再轉向：對手在背後就散熱或待機（轉向是下一回合機動宣告的事）', () => {
+    const behind = act({ row: 14 });
+    expect(duelAction(behind, player(behind))).toEqual({ type: 'WAIT' });
+    const hot = patch(behind, (n) => { n.units[0].heat = 80; });
     expect(duelAction(hot, player(hot))).toEqual({ type: 'COOL' });
   });
 
@@ -149,12 +173,13 @@ describe('引擎：敵機跟玩家用同一套規則', () => {
     expect(r.state.steps[r.state.cursor]).toEqual({ kind: 'DECLARE', unitId: 'player' });
   });
 
-  it('同一個階段可以做好幾件事：噴射機背對玩家 → 免費轉向 → 開槍', () => {
+  it('噴射機背對玩家：機動宣告裡轉過來（免費、吃速度）→ 移動 → 開槍', () => {
     const r = run(arena({ rival: 'jt1', facing: 0 }), [COAST, WAIT]);
     const mine = r.events.filter((e) => ('unitId' in e && e.unitId === 'rival') || ('shooterId' in e && e.shooterId === 'rival'));
     const kinds = mine.map((e) => e.type);
     expect(kinds).toContain('TURNED');
-    expect(kinds.indexOf('FIRED')).toBeGreaterThan(kinds.indexOf('TURNED'));
+    expect(kinds.indexOf('MOVED')).toBeGreaterThan(kinds.indexOf('TURNED'));
+    expect(kinds.indexOf('FIRED')).toBeGreaterThan(kinds.indexOf('MOVED'));
   });
 
   it('被打爆 → 敵方勝；打爆敵機 → 玩家勝', () => {

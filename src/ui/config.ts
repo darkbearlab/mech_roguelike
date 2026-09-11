@@ -6,9 +6,11 @@
  */
 import uiJson from '../data/ui.json';
 
-/** 右盤（功能盤）的按鍵代號。 */
-export type PadKey =
-  | 'turnL' | 'turnR' | 'lock' | 'fire' | 'reload' | 'swap' | 'cool' | 'switchDrive' | 'wait';
+/** 右盤（功能盤）的按鍵代號。轉向搬到左盤了（機動宣告）。 */
+export type PadKey = 'lock' | 'fire' | 'reload' | 'swap' | 'cool' | 'switchDrive' | 'wait';
+
+/** 右盤佈局的一格："" = 保留的空位。 */
+export type PadCell = PadKey | '';
 
 /**
  * 座艙的資訊層：機型差異落在「能知道什麼」，不是「按鈕在哪」。
@@ -27,7 +29,7 @@ export interface Readouts {
 
 export interface Cockpit {
   name: string;
-  pad: PadKey[][];
+  pad: PadCell[][];
   readouts: Readouts;
 }
 
@@ -41,7 +43,7 @@ export interface UiConfig {
     followActingUnit: 'OFF' | 'SNAP' | 'PAN';
   };
   preview: { driftTurns: number; trailLength: number };
-  /** 左盤佈局：相對機首的方向編號字串、'OK'（確認鍵）、''（空格）。 */
+  /** 左盤佈局：相對機首的方向編號字串、'OK'（確認鍵）、'L' / 'R'（轉向）、'NOSE'（機首）、''（空格）。 */
   movePad: string[][];
   cockpits: Record<string, Cockpit>;
 }

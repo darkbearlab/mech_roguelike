@@ -114,9 +114,13 @@ export interface GameState {
   over: null | { winner: Side | 'DRAW' };
 }
 
+/**
+ * ACCEL = 左盤的機動宣告（設計者 2026-09-11：轉向也在移動之前決定）：
+ * 先轉 turn 面（正 = 右轉、負 = 左轉，−3..3），再往相對**新機首**的方向加速。
+ * 右盤（行動）不再轉向。
+ */
 export type Command =
-  | { type: 'ACCEL'; order: AccelOrder }
-  | { type: 'TURN'; delta: 1 | -1 }
+  | { type: 'ACCEL'; order: AccelOrder; turn?: number }
   | { type: 'FIRE'; targetId: string }
   | { type: 'RELOAD' }
   | { type: 'COOL' }

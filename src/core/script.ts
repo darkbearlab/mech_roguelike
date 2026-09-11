@@ -4,11 +4,12 @@
  * 靶（固定靶、巡邏的靶機）在這裡；敵機（DUEL）的腦袋在 ai.ts。
  * 規劃移動用的都是 nav.ts 的 planAccel，跟玩家、bot 共用同一套移動規則，不走捷徑。
  */
-import { duelAccel } from './ai';
-import { dirToward, hexDist } from './hex';
-import type { Dir } from './hex';
+import { duelDeclare } from './ai';
+import type { Declaration } from './ai';
+import { planTurn } from './engine';
+import { dirToward, hexDist, turnDelta } from './hex';
 import { planAccel } from './nav';
-import type { AccelOrder, GameState, Unit } from './state';
+import type { GameState, Unit } from './state';
 
 /** 巡邏的目前目標；到了（1 格內）就換下一個。會就地更新腳本的 next。 */
 function patrolGoal(u: Unit): Unit['pos'] | null {
@@ -18,18 +19,13 @@ function patrolGoal(u: Unit): Unit['pos'] | null {
   return sc.points[sc.next];
 }
 
-/** 加速宣告。 */
-export function scriptAccel(s: GameState, u: Unit): AccelOrder {
-  if (u.script?.kind === 'DUEL') return duelAccel(s, u);
+/** 機動宣告：巡邏的先把機首轉向目標（靶機轉向免費），再往目標開；其餘不動。 */
+export function scriptDeclare(s: GameState, u: Unit): Declaration {
+  if (u.script?.kind === 'DUEL') return duelDeclare(s, u);
   const goal = patrolGoal(u);
-  if (!goal || u.shutdown > 0) return null;
-  return planAccel(s, u.id, goal, { depth: 2, stop: false });
-}
-
-/** 行動階段：巡邏的把機首轉向目標（靶機轉向免費）。回傳新的機首；不轉回傳 null。 */
-export function scriptFacing(u: Unit): Dir | null {
-  const goal = patrolGoal(u);
-  if (!goal) return null;
-  const want = dirToward(u.pos, goal, u.facing);
-  return want === u.facing ? null : want;
+  if (!goal || u.shutdown > 0) return { turn: 0, order: null };
+  const want = turnDelta(u.facing, dirToward(u.pos, goal, u.facing));
+  const plan = planTurn(s.rules, u, want);
+  // 付不起就不轉（plan.unit 是原本的自己）
+  return { turn: plan.ok ? want : 0, order: planAccel(s, u.id, goal, { depth: 2, stop: false, unit: plan.unit }) };
 }

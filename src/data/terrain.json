@@ -1,10 +1,10 @@
 {
-  "_comment": "地形（§8）。glyph 是地圖檔 rows 裡的字元。elevation 是整數高度；視線規則是「直線上有格子高於起點與終點就阻斷」（第 3 步接線）。",
-  "_dragModifier": "加在驅動阻力上，取的是單位**出發那一格**的地形 —— 阻力在位移之前結算（§3.1 第 3 步），那一刻機體踩的是出發格。",
-  "_ridge": "稜線的 elevation 設為 2，比高地還高：站在高地上也看不穿稜線。blocksLos 另外明寫，是為了讓「不可進入且擋視線」不必依賴高度數值。",
+  "_comment": "地形（地圖的外觀與日後的視線／感測資料）。glyph 是地圖檔 rows 裡的字元。",
+  "_movement": "**地形目前不影響移動**：設計者 2026-09-11 說先無視任何地形限制、之後再慢慢討論。所以這裡沒有「不可進入」「減速」之類的欄位 —— 稜線畫得出來，但開得過去。",
+  "_los": "elevation 與 blocksLos 是給日後的視線用的，還沒接線。",
 
-  "open":     { "name": "開闊", "glyph": ".", "passable": true,  "blocksLos": false, "elevation": 0, "dragModifier": 0, "sensorBonus": 0 },
-  "rubble":   { "name": "碎石", "glyph": ",", "passable": true,  "blocksLos": false, "elevation": 0, "dragModifier": 2, "sensorBonus": 0 },
-  "ridge":    { "name": "稜線", "glyph": "#", "passable": false, "blocksLos": true,  "elevation": 2, "dragModifier": 0, "sensorBonus": 0 },
-  "highland": { "name": "高地", "glyph": "^", "passable": true,  "blocksLos": false, "elevation": 1, "dragModifier": 0, "sensorBonus": 2 }
+  "open":     { "name": "開闊", "glyph": ".", "elevation": 0, "blocksLos": false },
+  "rubble":   { "name": "碎石", "glyph": ",", "elevation": 0, "blocksLos": false },
+  "ridge":    { "name": "稜線", "glyph": "#", "elevation": 2, "blocksLos": true },
+  "highland": { "name": "高地", "glyph": "^", "elevation": 1, "blocksLos": false }
 }

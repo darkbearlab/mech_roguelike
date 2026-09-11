@@ -1,28 +1,37 @@
 /**
  * Canvas 2D 繪製。只讀 GameState，不改動任何東西。
  *
- * 圖層由下而上：地形 → 軌跡 → 巡航預測 → 幽靈標記與路徑 → 單位（射界、機身、速度箭頭）→ 點選的格子。
+ * 圖層由下而上：地形 → 軌跡 → 巡航預測 → 這回合的預測路徑與落點 → 左盤方向提示 → 單位 → 點選的格子。
+ * 機體永遠畫在格子中心（只有位移動畫的途中會在兩格之間）。
  */
-import type { Hex, SubVec } from '../core/hex';
-import { SUB, hexLen, subToHex } from '../core/hex';
+import type { Dir, Hex } from '../core/hex';
+import { DIR_VEC, add, rotate, scale } from '../core/hex';
 import type { GameMap } from '../core/map';
 import { allHexes, cellAt } from '../core/map';
 import type { GameState, Unit } from '../core/state';
 import type { Camera } from './camera';
 import { worldToScreen } from './camera';
 import type { Pt } from './geometry';
-import { axialToWorld, dirAngle, hexCorners, subToWorld } from './geometry';
-import type { Motion } from './motion';
+import { axialToWorld, dirAngle, hexCorners } from './geometry';
+import type { AxialPt, Motion } from './motion';
 
-export interface Ghost {
-  key: string;
-  /** 標在落點上的字元（↑↗…○■）。 */
-  glyph: string;
-  pos: SubVec;
-  vel: SubVec;
+/** 這回合左盤目前的選擇會發生什麼（預測）。 */
+export interface Preview {
   path: Hex[];
+  pos: Hex;
+  heading: Dir;
+  speed: number;
   collision: Hex | null;
-  legal: boolean;
+  /** 選了方向（亮）還是只是「不點會怎樣」（暗）。 */
+  selected: boolean;
+}
+
+/** 左盤方向提示：機體周圍六格，標出相對機首的每個方向最多能點幾下。 */
+export interface RelHint {
+  facing: Dir;
+  taps: number[];
+  /** 目前選的相對方向與點數。 */
+  sel: { rel: number; taps: number } | null;
 }
 
 export interface Scene {
@@ -32,13 +41,11 @@ export interface Scene {
   viewH: number;
   now: number;
   motion: Motion;
-  /** 加速宣告時八個選項的預測落點（§9 幽靈標記）。 */
-  ghosts: Ghost[];
-  /** 按住的那一鍵：畫出整條路徑。 */
-  focus: Ghost | null;
-  /** 從 focus（或目前狀態）起算，照速度再巡航幾回合的落點。 */
-  drift: SubVec[];
-  trail: SubVec[];
+  preview: Preview | null;
+  hint: RelHint | null;
+  /** 從預測落點起算，之後不加速再滑幾回合的落點。 */
+  drift: Hex[];
+  trail: Hex[];
   picked: Hex | null;
 }
 
@@ -50,20 +57,22 @@ const C = {
   rubbleDot: '#3b342a',
   highland: '#1b2530',
   highlandRim: '#2f4050',
-  ridge: '#3a4451',
-  ridgeTop: '#5a6776',
-  ridgeShade: '#262d36',
+  ridge: '#333c48',
+  ridgeTop: '#4d5967',
+  ridgeShade: '#232a33',
   player: '#4fd6ff',
   enemy: '#ff6b5a',
-  // 顏色的約定：青色 = 機體與朝向；琥珀色 = 運動（速度、預測落點、巡航預測）
+  // 顏色的約定：青色 = 機體與機首；琥珀色 = 運動（速度、預測、滑行）
   vel: 'rgba(255,209,102,0.9)',
   ghost: '#ffd166',
-  ghostDim: 'rgba(255,209,102,0.45)',
-  path: 'rgba(255,209,102,0.16)',
+  ghostDim: 'rgba(255,209,102,0.4)',
+  path: 'rgba(255,209,102,0.18)',
+  pathDim: 'rgba(255,209,102,0.07)',
   hit: '#ff5a5a',
-  arc: 'rgba(79,214,255,0.07)',
+  arc: 'rgba(79,214,255,0.06)',
+  hint: 'rgba(79,214,255,0.55)',
   trail: 'rgba(79,214,255,0.3)',
-  drift: 'rgba(255,209,102,0.5)',
+  drift: 'rgba(255,209,102,0.45)',
   picked: 'rgba(255,255,255,0.7)',
 } as const;
 
@@ -74,12 +83,8 @@ function tracePoly(ctx: CanvasRenderingContext2D, pts: Pt[]): void {
   ctx.closePath();
 }
 
-function hexScreen(cam: Camera, h: Hex): Pt {
-  return worldToScreen(cam, axialToWorld(h.q, h.r));
-}
-
-function subScreen(cam: Camera, p: SubVec): Pt {
-  return worldToScreen(cam, subToWorld(p));
+function toScreen(cam: Camera, p: AxialPt): Pt {
+  return worldToScreen(cam, axialToWorld(p.q, p.r));
 }
 
 /** 格子的固定亂數（碎石的點點），跟著座標走，不用 RNG。 */
@@ -91,7 +96,7 @@ function cellHash(h: Hex, k: number): number {
 function drawTerrain(ctx: CanvasRenderingContext2D, map: GameMap, cam: Camera, viewW: number, viewH: number): void {
   const s = cam.size;
   for (const h of allHexes(map)) {
-    const c = hexScreen(cam, h);
+    const c = toScreen(cam, h);
     if (c.x < -s * 2 || c.x > viewW + s * 2 || c.y < -s * 2 || c.y > viewH + s * 2) continue;
     const cell = cellAt(map, h)!;
     const corners = hexCorners(c.x, c.y, s * 0.985);
@@ -115,18 +120,16 @@ function drawTerrain(ctx: CanvasRenderingContext2D, map: GameMap, cam: Camera, v
         ctx.lineWidth = 1;
         ctx.stroke();
         break;
-      case 'ridge': {
+      case 'ridge':
         ctx.fillStyle = C.ridgeShade;
         ctx.fill();
-        // 上半邊亮、下半邊暗：看起來像突起的岩脊
-        tracePoly(ctx, hexCorners(c.x, c.y - s * 0.12, s * 0.8));
+        tracePoly(ctx, hexCorners(c.x, c.y - s * 0.1, s * 0.8));
         ctx.fillStyle = C.ridge;
         ctx.fill();
         ctx.strokeStyle = C.ridgeTop;
         ctx.lineWidth = 1;
         ctx.stroke();
         break;
-      }
       default:
         ctx.fillStyle = C.open;
         ctx.fill();
@@ -138,10 +141,10 @@ function drawTerrain(ctx: CanvasRenderingContext2D, map: GameMap, cam: Camera, v
   }
 }
 
-function drawDots(ctx: CanvasRenderingContext2D, cam: Camera, pts: SubVec[], color: string, r: number): void {
+function drawDots(ctx: CanvasRenderingContext2D, cam: Camera, pts: Hex[], color: string, r: number): void {
   ctx.fillStyle = color;
   for (const p of pts) {
-    const c = subScreen(cam, p);
+    const c = toScreen(cam, p);
     ctx.beginPath();
     ctx.arc(c.x, c.y, r, 0, Math.PI * 2);
     ctx.fill();
@@ -171,73 +174,78 @@ function drawArrow(ctx: CanvasRenderingContext2D, from: Pt, to: Pt, color: strin
   ctx.fill();
 }
 
-function drawGhosts(ctx: CanvasRenderingContext2D, sc: Scene): void {
-  const { cam } = sc;
+function drawPreview(ctx: CanvasRenderingContext2D, cam: Camera, p: Preview): void {
   const s = cam.size;
-  if (sc.focus) {
-    for (const h of sc.focus.path.slice(1)) {
-      tracePoly(ctx, hexCorners(hexScreen(cam, h).x, hexScreen(cam, h).y, s * 0.9));
-      ctx.fillStyle = C.path;
-      ctx.fill();
-    }
-    if (sc.focus.collision) {
-      const c = hexScreen(cam, sc.focus.collision);
-      ctx.strokeStyle = C.hit;
-      ctx.lineWidth = 3;
-      const k = s * 0.35;
-      ctx.beginPath();
-      ctx.moveTo(c.x - k, c.y - k);
-      ctx.lineTo(c.x + k, c.y + k);
-      ctx.moveTo(c.x + k, c.y - k);
-      ctx.lineTo(c.x - k, c.y + k);
-      ctx.stroke();
-    }
+  for (const h of p.path.slice(1)) {
+    const c = toScreen(cam, h);
+    tracePoly(ctx, hexCorners(c.x, c.y, s * 0.9));
+    ctx.fillStyle = p.selected ? C.path : C.pathDim;
+    ctx.fill();
   }
+  if (p.collision) {
+    const c = toScreen(cam, p.collision);
+    const k = s * 0.35;
+    ctx.strokeStyle = C.hit;
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(c.x - k, c.y - k);
+    ctx.lineTo(c.x + k, c.y + k);
+    ctx.moveTo(c.x + k, c.y - k);
+    ctx.lineTo(c.x - k, c.y + k);
+    ctx.stroke();
+  }
+  // 落點：一個空心的機身輪廓 + 速度數字
+  if (p.path.length > 1 || p.selected) {
+    const c = toScreen(cam, p.pos);
+    ctx.beginPath();
+    ctx.arc(c.x, c.y, s * 0.42, 0, Math.PI * 2);
+    ctx.strokeStyle = p.selected ? C.ghost : C.ghostDim;
+    ctx.lineWidth = p.selected ? 2 : 1;
+    ctx.setLineDash([4, 3]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = p.selected ? C.ghost : C.ghostDim;
+    ctx.font = `bold ${Math.round(s * 0.45)}px system-ui, sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(String(p.speed), c.x, c.y + 1);
+  }
+}
+
+/** 機體周圍六格標出「往這個方向最多能點幾下」—— 左盤跟著機首排，這個讓人對得上地圖。 */
+function drawHint(ctx: CanvasRenderingContext2D, cam: Camera, u: Unit, h: RelHint): void {
+  const s = cam.size;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
-  for (const g of sc.ghosts) {
-    if (!g.legal) continue;
-    const on = sc.focus?.key === g.key;
-    if (sc.focus && !on) continue;
-    const c = subScreen(cam, g.pos);
-    const r = Math.max(7, s * (on ? 0.34 : 0.24));
-    ctx.beginPath();
-    ctx.arc(c.x, c.y, r, 0, Math.PI * 2);
-    ctx.fillStyle = on ? 'rgba(255,209,102,0.28)' : 'rgba(11,14,18,0.72)';
-    ctx.fill();
-    ctx.strokeStyle = on ? C.ghost : C.ghostDim;
-    ctx.lineWidth = on ? 2 : 1;
-    ctx.stroke();
-    ctx.fillStyle = on ? C.ghost : C.ghostDim;
-    ctx.font = `${Math.round(r * 1.15)}px system-ui, sans-serif`;
-    ctx.fillText(g.glyph, c.x, c.y + 0.5);
-    if (g.collision) {
-      ctx.fillStyle = C.hit;
-      ctx.beginPath();
-      ctx.arc(c.x + r * 0.8, c.y - r * 0.8, 3, 0, Math.PI * 2);
-      ctx.fill();
-    }
+  for (let rel = 0; rel < 6; rel++) {
+    const n = h.taps[rel];
+    const on = h.sel?.rel === rel;
+    if (n === 0 && !on) continue;
+    const d = rotate(h.facing, rel);
+    const c = toScreen(cam, add(u.pos, DIR_VEC[d]));
+    const label = on ? `${h.sel!.taps}/${n}` : String(n);
+    ctx.font = `${on ? 'bold ' : ''}${Math.round(s * (on ? 0.42 : 0.34))}px system-ui, sans-serif`;
+    ctx.fillStyle = on ? C.ghost : C.hint;
+    ctx.fillText(label, c.x, c.y);
   }
 }
 
 function drawUnit(ctx: CanvasRenderingContext2D, sc: Scene, u: Unit): void {
   const { cam, now, motion } = sc;
   const s = cam.size;
-  const pos = motion.posOf(u.id, u.posSub, now);
-  const c = subScreen(cam, pos);
+  const moving = motion.active(now);
+  const c = toScreen(cam, motion.posOf(u.id, u.pos, now));
   const color = u.side === 'PLAYER' ? C.player : C.enemy;
   const face = motion.angleOf(u.id, dirAngle(u.facing), now);
 
-  // 佔格外框：遊戲判定用的是這一格，不是機體畫在哪
-  const occ = hexScreen(cam, subToHex(u.posSub));
-  if (!motion.active(now)) {
-    tracePoly(ctx, hexCorners(occ.x, occ.y, s * 0.93));
+  if (!moving) {
+    tracePoly(ctx, hexCorners(c.x, c.y, s * 0.93));
     ctx.strokeStyle = u.side === 'PLAYER' ? 'rgba(79,214,255,0.45)' : 'rgba(255,107,90,0.45)';
     ctx.lineWidth = 1.5;
     ctx.stroke();
   }
 
-  // 前方三面 = 朝向前的半平面（§3.3）：地面驅動的可加速方向、之後的武器射界
+  // 機首前方的半平面：日後的武器射界
   ctx.beginPath();
   ctx.moveTo(c.x, c.y);
   ctx.arc(c.x, c.y, s * 1.6, face - Math.PI / 2, face + Math.PI / 2);
@@ -254,7 +262,7 @@ function drawUnit(ctx: CanvasRenderingContext2D, sc: Scene, u: Unit): void {
   ctx.strokeStyle = color;
   ctx.lineWidth = 2.5;
   ctx.stroke();
-  // 機首（朝向）
+  // 機首
   ctx.beginPath();
   ctx.moveTo(c.x + Math.cos(face) * r * 1.35, c.y + Math.sin(face) * r * 1.35);
   ctx.lineTo(c.x + Math.cos(face + 2.4) * r * 0.75, c.y + Math.sin(face + 2.4) * r * 0.75);
@@ -271,9 +279,9 @@ function drawUnit(ctx: CanvasRenderingContext2D, sc: Scene, u: Unit): void {
     ctx.fillText('停機', c.x, c.y - r * 1.4);
   }
 
-  // 速度箭頭：從機體指向「照這個速度巡航一回合」的位置（不含阻力，純向量）
-  if (hexLen(u.velSub) > 0 && !motion.active(now)) {
-    const tip = subScreen(cam, { q: u.posSub.q + u.velSub.q, r: u.posSub.r + u.velSub.r });
+  // 速度：沿速度方向畫到「照目前速度走一回合」的那一格
+  if (u.speed > 0 && !moving) {
+    const tip = toScreen(cam, add(u.pos, scale(DIR_VEC[u.heading], u.speed)));
     drawArrow(ctx, c, tip, C.vel, 2);
   }
 }
@@ -284,21 +292,19 @@ export function draw(ctx: CanvasRenderingContext2D, sc: Scene): void {
   ctx.fillRect(0, 0, viewW, viewH);
   drawTerrain(ctx, state.map, cam, viewW, viewH);
   drawDots(ctx, cam, sc.trail, C.trail, Math.max(2, cam.size * 0.08));
-  if (!sc.motion.active(sc.now)) {
+  const still = !sc.motion.active(sc.now);
+  if (still) {
     drawDots(ctx, cam, sc.drift, C.drift, Math.max(2, cam.size * 0.1));
-    drawGhosts(ctx, sc);
+    if (sc.preview) drawPreview(ctx, cam, sc.preview);
   }
   for (const u of state.units) if (u.alive) drawUnit(ctx, sc, u);
+  const me = state.units[0];
+  if (still && sc.hint && me) drawHint(ctx, cam, me, sc.hint);
   if (sc.picked) {
-    const c = hexScreen(cam, sc.picked);
+    const c = toScreen(cam, sc.picked);
     tracePoly(ctx, hexCorners(c.x, c.y, cam.size * 0.95));
     ctx.strokeStyle = C.picked;
     ctx.lineWidth = 2;
     ctx.stroke();
   }
-}
-
-/** 速度換算成「格/回合」字串，保留一位小數（§2）。 */
-export function speedText(v: SubVec): string {
-  return (hexLen(v) / SUB).toFixed(1);
 }

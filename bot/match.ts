@@ -1,16 +1,15 @@
 /**
  * 一場自動對局。與 CLI（run.ts）分開，測試才能直接呼叫而不會觸發整批執行。
  *
- * 第 2 步還沒有敵人與武器，所以「一場」= 從隨機起點開到隨機目標點，抵達或逾時。
+ * 還沒有敵人與武器，所以「一場」= 從隨機起點開到隨機目標點，抵達或逾時。
  */
 import { newGame } from '../src/core/engine';
-import type { Dir, Hex } from '../src/core/hex';
-import { hexDist, hexLen } from '../src/core/hex';
-import { allHexes, cellAt } from '../src/core/map';
+import type { Dir } from '../src/core/hex';
+import { hexDist } from '../src/core/hex';
+import { allHexes } from '../src/core/map';
 import type { GameMap } from '../src/core/map';
-import { arrived, distanceField } from '../src/core/nav';
+import { arrived } from '../src/core/nav';
 import { createRng, nextInt } from '../src/core/rng';
-import type { RngState } from '../src/core/rng';
 import type { Rules } from '../src/core/rules';
 import type { GameState } from '../src/core/state';
 import { pilotTurn } from './pilot';
@@ -25,7 +24,7 @@ export interface RunResult {
   distance: number;
   heatPeak: number;
   collisions: number;
-  /** 最高速（sub/回合）。 */
+  /** 最高速（格/回合）。 */
   topSpeed: number;
   shutdowns: number;
 }
@@ -33,24 +32,14 @@ export interface RunResult {
 export const MIN_DIST = 12;
 export const MAX_DIST = 24;
 
-function pickOpen(map: GameMap, rng: RngState, cells: Hex[]): Hex {
-  for (;;) {
-    const h = cells[nextInt(rng, cells.length)];
-    if (cellAt(map, h)?.passable) return h;
-  }
-}
-
-/** 同一個種子永遠是同一場（§1：bot 對局可重現）。 */
+/** 同一個種子永遠是同一場（bot 對局可重現）。 */
 export function runOne(rules: Rules, map: GameMap, chassis: string, seed: number, maxTurns: number): RunResult {
   const rng = createRng(seed);
   const cells = allHexes(map);
-  const start = pickOpen(map, rng, cells);
-  let goal = pickOpen(map, rng, cells);
-  let dist = distanceField(map, goal);
-  while (hexDist(start, goal) < MIN_DIST || hexDist(start, goal) > MAX_DIST || dist(start) === Infinity) {
-    goal = pickOpen(map, rng, cells);
-    dist = distanceField(map, goal);
-  }
+  const pick = () => cells[nextInt(rng, cells.length)];
+  const start = pick();
+  let goal = pick();
+  while (hexDist(start, goal) < MIN_DIST || hexDist(start, goal) > MAX_DIST) goal = pick();
   const facing = nextInt(rng, 6) as Dir;
 
   let s = newGame(rules, map, { seed, player: { chassis, hex: start, facing } });
@@ -60,10 +49,10 @@ export function runOne(rules: Rules, map: GameMap, chassis: string, seed: number
   };
   const there = (st: GameState): boolean => arrived(st, 'player', goal);
   for (let t = 1; t <= maxTurns; t++) {
-    const turn = pilotTurn(s, 'player', goal, there, dist);
+    const turn = pilotTurn(s, 'player', goal, there);
     s = turn.state;
     r.heatPeak = Math.max(r.heatPeak, turn.heatPeak);
-    r.topSpeed = Math.max(r.topSpeed, hexLen(s.units[0].velSub));
+    r.topSpeed = Math.max(r.topSpeed, s.units[0].speed);
     for (const e of turn.events) {
       if (e.type === 'COLLIDED') r.collisions++;
       if (e.type === 'OVERHEAT') r.shutdowns++;

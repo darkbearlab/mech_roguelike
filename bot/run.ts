@@ -1,5 +1,5 @@
 /**
- * 無介面自動對局（§1）：跑 N 場、輸出基線數據。之後每次改平衡都拿它比對。
+ * 無介面自動對局：跑 N 場、輸出基線數據。之後每次改平衡都拿它比對。
  *
  *   npm run bot                         每台機體 30 場
  *   npm run bot -- --runs 100 --seed 7  場數與起始種子
@@ -12,7 +12,6 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { parseArgs } from 'node:util';
 import { rawMapById } from '../src/core/content';
-import { SUB } from '../src/core/hex';
 import { loadMap } from '../src/core/map';
 import { driveProfile } from '../src/core/movement';
 import { RULES } from '../src/core/rules';
@@ -48,18 +47,19 @@ const ids = values.chassis === 'all' ? Object.keys(RULES.chassis) : [values.chas
 console.log(`\n地圖 ${map.name}（${map.id}）· 每台 ${runs} 場 · 種子 ${seed0}..${seed0 + runs - 1} · 上限 ${maxTurns} 回合`);
 console.log(`一場 = 從隨機起點開到 ${MIN_DIST}～${MAX_DIST} 格外的隨機目標（抵達 = 佔格離目標 ≤ 1）\n`);
 
-console.log('驅動輪廓（空地、無地形修正）');
-console.log('機體       驅動  accel drag 極速 淨推 到極速 滑行停 制動停 每推熱');
-for (const id of ids) {
-  for (const d of RULES.chassis[id].drives) {
-    const p = driveProfile(RULES, id, d);
-    const n = (x: number | null): string => (x === null ? '∞' : String(x));
-    console.log(
-      `${RULES.chassis[id].name.padEnd(9)} ${RULES.drives[d].name.padEnd(3)}`,
-      pad(p.accel, 5), pad(p.drag, 4), pad(p.maxSpeed, 4), pad(p.netPush, 4),
-      pad(n(p.turnsToMax), 6), pad(n(p.coastTurns), 6), pad(n(p.brakeTurns), 6), pad(p.heatPerPush, 6),
-    );
-  }
+console.log('驅動輪廓（空地、無地形修正；回合數）');
+console.log('驅動  極速  點數 前/前側/後側/後  折損60/120  衰減  到極速  滑行停  煞車停  極速轉60°  推滿熱');
+for (const d of Object.values(RULES.drives)) {
+  const p = driveProfile(RULES, d.id);
+  const n = (x: number | null): string => (x === null ? '—' : String(x));
+  const t = d.taps;
+  console.log(
+    d.name.padEnd(4), pad(d.maxSpeed, 3),
+    pad(`${t.front}/${t.frontSide}/${t.rearSide}/${t.rear}`, 17),
+    pad(`${d.turnLoss.d60}/${d.turnLoss.d120}`, 11), pad(d.decay, 5),
+    pad(n(p.turnsToMax), 7), pad(n(p.coastTurns), 7), pad(n(p.brakeTurns), 7),
+    pad(n(p.veer60AtMax), 10), pad(p.heatFullPush, 7),
+  );
 }
 
 const all: RunResult[] = [];
@@ -77,7 +77,7 @@ for (const id of ids) {
     pad(avg(rows, (r) => r.heatPeak).toFixed(1), 8),
     pad(avg(rows, (r) => r.collisions).toFixed(2), 8),
     pad(avg(rows, (r) => r.shutdowns).toFixed(2), 8),
-    pad((avg(rows, (r) => r.topSpeed) / SUB).toFixed(1), 7),
+    pad(avg(rows, (r) => r.topSpeed).toFixed(1), 7),
     pad('—', 5), pad('—', 6),
   );
 }

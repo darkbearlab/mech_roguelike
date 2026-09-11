@@ -1,8 +1,8 @@
 /**
- * 行動點與熱量（§4）。
+ * 行動點與熱量。
  *
  * 行動點是節拍器，熱量才是貨幣。這裡只放兩者的帳務規則；
- * 「什麼時候付、付給誰」由 engine.ts 決定。
+ * 「什麼時候付、階段什麼時候結束」由 engine.ts 決定。
  *
  * 這些函式會就地修改傳入的 Unit —— 只能用在 applyCommand() 複製過的狀態上。
  */
@@ -12,14 +12,15 @@ import type { Unit } from './state';
 export interface ApCheck {
   ok: boolean;
   reason?: string;
-  /** 這個行動會新增多少債務。 */
+  /** 這個行動會新增多少債務（> 0 = 透支：行動照常結算，然後階段結束）。 */
   overdraft: number;
 }
 
 /**
- * 階段開始時的配額（§4.1）：配額**先扣抵債務**，剩下的才是這個階段能用的 AP。
- * 在自己的階段開始時付、而不是回合開始時付 —— 這樣透支之後，
- * 整個敵人階段與世界階段都還背著債（不能散熱、命中率 −10%），脆弱視窗才看得見。
+ * 階段開始時的配額：配額**先扣抵債務**，剩下的才是這個階段能用的 AP；
+ * 扣不完的債繼續帶到下一個階段。
+ * 在自己的階段開始時才扣、而不是回合開始時 —— 這樣透支之後，
+ * 整個敵人階段與世界階段都還背著債（不能散熱），脆弱視窗才看得見。
  */
 export function payQuota(u: Unit, quota: number): void {
   const pay = Math.min(u.debt, quota);
@@ -28,15 +29,15 @@ export function payQuota(u: Unit, quota: number): void {
 }
 
 /**
- * 能不能付這筆 AP（§4.1）。
+ * 能不能付這筆 AP。
  *
- * - 成本 0 的事（免費轉向、待機）永遠可以做，就算還背著債
- * - 債務 > 0 時不能做任何要花 AP 的行動 —— 「還清前不能做新的行動」
+ * - 成本 0 的事（免費轉向、待機）永遠可以做
+ * - 手上沒有 AP 就不能做要花 AP 的事（AP 歸零時階段本來就會自動結束）
  * - 成本超過手上的 AP 時允許透支，但新增的債務不得超過 apDebtCap
  */
 export function checkAp(rules: Rules, u: Unit, cost: number): ApCheck {
   if (cost <= 0) return { ok: true, overdraft: 0 };
-  if (u.debt > 0) return { ok: false, reason: '償還債務中：還清前不能行動', overdraft: 0 };
+  if (u.ap <= 0) return { ok: false, reason: 'AP 用完了', overdraft: 0 };
   const overdraft = Math.max(0, cost - u.ap);
   if (overdraft > rules.economy.apDebtCap) {
     return { ok: false, reason: `透支 ${overdraft} 超過上限 ${rules.economy.apDebtCap}`, overdraft };
@@ -63,13 +64,13 @@ export function addHeat(rules: Rules, u: Unit, delta: number): boolean {
   return delta > 0 && u.heat >= cap && u.shutdown === 0;
 }
 
-/** 世界階段的被動散熱（§4.2）。債務 > 0 時不散熱（§4.1）。 */
+/** 世界階段的被動散熱。債務 > 0 時不散熱。 */
 export function passiveCool(rules: Rules, u: Unit): void {
   if (u.debt > 0) return;
   u.heat = Math.max(0, u.heat - rules.chassis[u.chassis].heatPassive);
 }
 
-/** 熱量是否已進入命中懲罰區（§4.2：> 70%）。第 5 步的命中公式與介面的熱量條共用。 */
+/** 熱量是否已進入命中懲罰區（> 70%）。第 5 步的命中公式與介面的熱量條共用。 */
 export function isHot(rules: Rules, u: Unit): boolean {
   return u.heat > rules.combat.heatPenaltyAbove * rules.chassis[u.chassis].heatCap;
 }

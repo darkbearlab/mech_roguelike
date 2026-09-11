@@ -1,5 +1,5 @@
 /**
- * 攝影機（§9）：機體置中於「點得到」的那塊區域，接近地圖邊緣時停止捲動。
+ * 攝影機：機體置中於「點得到」的那塊區域，接近地圖邊緣時停止捲動。
  *
  * 沿用 PMC 的結論：夾制的是**可觸區域**而不是整個視窗。HUD 與兩個觸控盤是浮在地圖上的，
  * 照視窗夾制的話，機體走到地圖下緣時會被壓在觸控盤底下。所以垂直方向夾在
@@ -54,7 +54,7 @@ export function hexSizeFor(viewW: number, hexesAcross: number, min: number, max:
 
 /**
  * @param focus 要置中的世界座標（機體的動畫位置）
- * @param pan   暫時的手動平移（世界座標）。下一次加速宣告就歸零（§9：移動後自動回中）。
+ * @param pan   暫時的手動平移（世界座標）。下一次加速宣告就歸零（移動後自動回中）。
  */
 export function computeCamera(
   b: WorldBounds, viewW: number, viewH: number, size: number, focus: Pt, pan: Pt, safe: SafeArea,

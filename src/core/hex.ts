@@ -1,28 +1,22 @@
 /**
- * 六角座標（§2）。flat-top（平頂）、axial (q, r)。
+ * 六角座標。flat-top（平頂）、axial (q, r)。
  *
- * **全專案只有這一把尺**：移動、射程、感測、視線一律用 hexLen / hexDist。
- * 不要在任何地方另外算歐氏距離做遊戲判定 —— 歐氏距離只准出現在 render/ 的像素換算。
+ * **位置永遠是整數格**：機體只會站在格子中心，不存在「兩格之間」。
+ * （v0.1 初版規格的 1/10 格次格精度已作廢 —— 那會讓機體停在格子之間，見 docs/design.md。）
+ *
+ * **全專案只有這一把尺**：移動、射程、感測、視線一律用 hexDist。
+ * 歐氏距離只准出現在 render/ 的像素換算。
  *
  * core/ 內不得 import 任何 DOM / Canvas / 瀏覽器 API。
  */
 
-/** 整數格。 */
+/** 整數格（也用來表示格與格之間的位移）。 */
 export interface Hex {
   q: number;
   r: number;
 }
 
-/** 以 1/SUB 格為單位的整數向量：位置（posSub）或速度（velSub）。 */
-export interface SubVec {
-  q: number;
-  r: number;
-}
-
-/** 次格精度（§2）：位置與速度一律存成 1/10 格的整數，避免浮點誤差。 */
-export const SUB = 10;
-
-/** 方向編號 0..5 = N, NE, SE, S, SW, NW（§2）。 */
+/** 方向編號 0..5 = N, NE, SE, S, SW, NW。 */
 export type Dir = 0 | 1 | 2 | 3 | 4 | 5;
 
 export const DIRS: readonly Dir[] = [0, 1, 2, 3, 4, 5];
@@ -39,19 +33,19 @@ export const DIR_VEC: readonly Hex[] = [
 export const DIR_NAME = ['N', 'NE', 'SE', 'S', 'SW', 'NW'] as const;
 
 /** 把 -0 正規化成 0。JSON 與 === 都分不出來，但 Object.is 與快照測試分得出來。 */
-export function vec(q: number, r: number): SubVec {
+export function vec(q: number, r: number): Hex {
   return { q: q + 0, r: r + 0 };
 }
 
-export function add(a: SubVec, b: SubVec): SubVec {
+export function add(a: Hex, b: Hex): Hex {
   return vec(a.q + b.q, a.r + b.r);
 }
 
-export function sub(a: SubVec, b: SubVec): SubVec {
+export function sub(a: Hex, b: Hex): Hex {
   return vec(a.q - b.q, a.r - b.r);
 }
 
-export function scale(a: SubVec, k: number): SubVec {
+export function scale(a: Hex, k: number): Hex {
   return vec(a.q * k, a.r * k);
 }
 
@@ -59,13 +53,8 @@ export function sameHex(a: Hex, b: Hex): boolean {
   return a.q === b.q && a.r === b.r;
 }
 
-/**
- * 向量長度（cube 距離，§2）：(|q| + |q+r| + |r|) / 2。
- * 對整數向量結果必為整數（cube 座標三軸絕對值和恆為偶數）。
- * 格與 sub 都用它 —— 速度的「長度」、阻力的「減少 drag」、上限的「夾在 maxSpeed」
- * 全部是這把尺量的。
- */
-export function hexLen(v: SubVec): number {
+/** 位移的長度（cube 距離）：(|q| + |q+r| + |r|) / 2。 */
+export function hexLen(v: Hex): number {
   return (Math.abs(v.q) + Math.abs(v.q + v.r) + Math.abs(v.r)) / 2;
 }
 
@@ -73,7 +62,7 @@ export function hexDist(a: Hex, b: Hex): number {
   return hexLen(sub(a, b));
 }
 
-/** cube rounding：把小數 axial 座標歸到最近的整數格。 */
+/** cube rounding：把小數 axial 座標歸到最近的整數格（直線取樣、點地圖選格用）。 */
 export function hexRound(fq: number, fr: number): Hex {
   const fs = -fq - fr;
   let q = Math.round(fq);
@@ -87,18 +76,9 @@ export function hexRound(fq: number, fr: number): Hex {
   return vec(q, r);
 }
 
-/** 佔格（§2）：`round(posSub / SUB)`。所有遊戲判定都用這一格。 */
-export function subToHex(p: SubVec): Hex {
-  return hexRound(p.q / SUB, p.r / SUB);
-}
-
-/** 格中心的次格座標。 */
-export function hexToSub(h: Hex): SubVec {
-  return vec(h.q * SUB, h.r * SUB);
-}
-
 /**
- * 六角直線（含兩端）。§3.1 第 6 步的逐格判定、動畫路徑、以及第 3 步的視線都走這條。
+ * 六角直線（含兩端）。第 3 步的視線與日後的射線判定走這條。
+ * （移動不需要它：速度方向永遠是六個正方向之一，路徑就是一直線的格子。）
  *
  * 兩端點加上同一個微小偏移，避免直線剛好擦過兩格交界時的平手 ——
  * 偏移方向固定，所以同一組端點永遠得到同一條線（bot 對局可重現）。
@@ -131,18 +111,19 @@ export function turnSteps(a: Dir, b: Dir): number {
   return Math.min(cw, 6 - cw);
 }
 
-/**
- * 前方三面（§3.3）：朝向本身與左右各一面。
- * 決定地面驅動能往哪加速（§3.2 側向加速），第 3 步起也決定武器射界。
- */
+/** b 相對於 a 順時針差幾面（0..5）。 */
+export function relDir(a: Dir, b: Dir): Dir {
+  return ((((b - a) % 6) + 6) % 6) as Dir;
+}
+
+/** 前方三面：朝向本身與左右各一面。第 3 步起決定武器射界。 */
 export function inFrontArc(facing: Dir, d: Dir): boolean {
   return turnSteps(facing, d) <= 1;
 }
 
 /**
  * 從 from 看 to 最接近哪一個方向。以「往那個方向走一步後離 to 最近」判定 ——
- * 同一把尺，不另外算角度。平手時偏好 prefer（通常是目前朝向，避免 AI 無謂地轉來轉去），
- * 再來依方向編號。from 與 to 同格時回傳 prefer。
+ * 同一把尺，不另外算角度。平手時偏好 prefer，再來依方向編號。from 與 to 同格時回傳 prefer。
  */
 export function dirToward(from: Hex, to: Hex, prefer: Dir = 0): Dir {
   if (sameHex(from, to)) return prefer;

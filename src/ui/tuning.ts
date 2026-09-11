@@ -1,18 +1,18 @@
 /**
- * 調參面板：第 2 步是手感測試，設計者要能在手機上直接改數字、當場試。
+ * 調參面板：手感測試時，設計者要能在手機上直接改數字、當場試。
  *
  * 改的是一份 RulesPatch（疊在 data/*.json 上），存在 localStorage，重新整理後還在。
- * 「複製調整值」把 patch 印成 JSON —— 貼回來給我，我再把它寫進 data/。
+ * 「複製調整值」把 patch 印成 JSON —— 貼回來，就能寫進 data/。
  * 面板本身不碰 core/ 的任何狀態；它只產生一份新的 Rules，由 Game 換上。
  */
 import { driveProfile } from '../core/movement';
 import type { DriveProfile } from '../core/movement';
 import type { Rules, RulesPatch } from '../core/rules';
-import { accelOf } from '../core/rules';
 import { BUILD_ID } from './build';
 import { $, h } from './dom';
 
-const KEY = 'mech.tuning.v1';
+// v2：移動模型改成整數格之後，舊的調整值（thrust / drag…）已經沒有意義
+const KEY = 'mech.tuning.v2';
 
 export function loadPatch(): RulesPatch {
   try {
@@ -42,17 +42,37 @@ export interface TuningHost {
   restart(): void;
 }
 
-type Section = 'drives' | 'chassis' | 'terrain';
+type Section = 'drives' | 'chassis';
 
 interface Field {
   section: Section;
   id: string;
-  key: string;
+  /** 欄位路徑，例如 ['taps', 'front']。 */
+  path: string[];
   label: string;
   step: number;
   min: number;
-  /** 旁邊的註解（例如推力換算出的 accel）。 */
-  note?: (r: Rules) => string;
+}
+
+type Tree = Record<string, unknown>;
+
+function getIn(o: unknown, path: string[]): number {
+  let cur = o as Tree;
+  for (const k of path) cur = cur[k] as Tree;
+  return cur as unknown as number;
+}
+
+/** 在 patch 樹上設值；等於預設值就刪掉，並把變空的層一路剪掉。 */
+function setIn(root: Tree, path: string[], value: number | undefined): void {
+  const [k, ...rest] = path;
+  if (rest.length === 0) {
+    if (value === undefined) delete root[k];
+    else root[k] = value;
+    return;
+  }
+  const child = (root[k] ??= {}) as Tree;
+  setIn(child, rest, value);
+  if (Object.keys(child).length === 0) delete root[k];
 }
 
 function turnsText(n: number | null, never: string): string {
@@ -60,13 +80,12 @@ function turnsText(n: number | null, never: string): string {
 }
 
 function profileText(p: DriveProfile): string {
-  if (p.netPush === 0) return '⚠ 推不動：accel ≤ drag，淨推進為 0';
   return [
-    `淨推 +${(p.netPush / 10).toFixed(1)} 格/回`,
     `到極速 ${turnsText(p.turnsToMax, '到不了')}`,
     `滑行停 ${turnsText(p.coastTurns, '停不下來')}`,
-    `制動停 ${turnsText(p.brakeTurns, '停不下來')}`,
-    `每推 +${p.heatPerPush} 熱`,
+    `煞車停 ${turnsText(p.brakeTurns, '不能反推')}`,
+    `極速轉 60° 剩 ${p.veer60AtMax === null ? '—' : p.veer60AtMax} 速`,
+    `推滿 +${p.heatFullPush} 熱`,
   ].join(' · ');
 }
 
@@ -91,17 +110,12 @@ export class TuningPanel {
     this.root.classList.add('hidden');
   }
 
-  private set(section: Section, id: string, key: string, value: number): void {
-    const p = structuredClone(this.host.patch());
-    const table = (p[section] ??= {}) as Record<string, Record<string, number>>;
-    const row = (table[id] ??= {});
-    const baseVal = (this.host.base()[section] as unknown as Record<string, Record<string, unknown>>)[id][key];
-    if (value === baseVal) delete row[key];
-    else row[key] = value;
-    if (Object.keys(row).length === 0) delete table[id];
-    if (Object.keys(table).length === 0) delete p[section];
-    savePatch(p);
-    this.host.setPatch(p);
+  private set(f: Field, value: number): void {
+    const p = structuredClone(this.host.patch()) as Tree;
+    const base = getIn((this.host.base() as unknown as Tree)[f.section], [f.id, ...f.path]);
+    setIn(p, [f.section, f.id, ...f.path], value === base ? undefined : value);
+    savePatch(p as RulesPatch);
+    this.host.setPatch(p as RulesPatch);
     this.render();
   }
 
@@ -113,7 +127,7 @@ export class TuningPanel {
 
     const head = h('div', 'tune-head');
     const title = h('div');
-    title.append(h('b', '', '調參（第 2 步：手感測試）'), h('br'), h('small', '', 'build ' + BUILD_ID));
+    title.append(h('b', '', '調參（手感測試）'), h('br'), h('small', '', 'build ' + BUILD_ID));
     head.append(title);
     const close = h('button', 'tune-x', '✕');
     close.type = 'button';
@@ -121,7 +135,6 @@ export class TuningPanel {
     head.append(close);
     body.append(head);
 
-    // 機體
     const pick = h('div', 'tune-chassis');
     for (const ch of Object.values(rules.chassis)) {
       const b = h('button', ch.id === chassisId ? 'on' : '', ch.name);
@@ -134,34 +147,35 @@ export class TuningPanel {
     }
     body.append(pick);
 
-    // 驅動
     for (const d of c.drives) {
       const drive = rules.drives[d];
       const box = h('section', 'tune-box');
       box.append(h('h3', '', `驅動：${drive.name}`));
-      const fields: Field[] = [
-        { section: 'drives', id: d, key: 'thrust', label: '推力 thrust', step: 5, min: 0, note: (r) => `accel ${accelOf(r, chassisId, d)}` },
-        { section: 'drives', id: d, key: 'drag', label: '阻力 drag', step: 1, min: 0 },
-        { section: 'drives', id: d, key: 'maxSpeed', label: '極速 maxSpeed', step: 1, min: 0 },
-        { section: 'drives', id: d, key: 'heatPerAccel', label: '產熱 /10sub', step: 1, min: 0 },
-      ];
-      for (const f of fields) box.append(this.stepper(rules, f));
-      box.append(h('p', 'tune-profile', profileText(driveProfile(rules, chassisId, d))));
+      const f = (path: string[], label: string, min = 0): Field => ({ section: 'drives', id: d, path, label, step: 1, min });
+      for (const field of [
+        f(['maxSpeed'], '極速'),
+        f(['taps', 'front'], '點數：前'),
+        f(['taps', 'frontSide'], '點數：左右前'),
+        f(['taps', 'rearSide'], '點數：左右後'),
+        f(['taps', 'rear'], '點數：後'),
+        f(['turnLoss', 'd60'], '轉 60° 折損'),
+        f(['turnLoss', 'd120'], '轉 120° 折損'),
+        f(['decay'], '不加速衰減'),
+        f(['facingTurnSpeedLoss'], '右盤轉向扣速'),
+        f(['heatPerTap'], '每點一下的熱'),
+      ]) box.append(this.stepper(rules, field));
+      box.append(h('p', 'tune-profile', profileText(driveProfile(rules, d))));
       body.append(box);
     }
 
-    // 機體與地形
     const box = h('section', 'tune-box');
     box.append(h('h3', '', `機體：${c.name}`));
-    for (const f of [
-      { section: 'chassis', id: chassisId, key: 'mass', label: '質量 mass', step: 5, min: 5 },
-      { section: 'chassis', id: chassisId, key: 'apQuota', label: 'AP 配額', step: 1, min: 0 },
-      { section: 'chassis', id: chassisId, key: 'heatPassive', label: '被動散熱', step: 1, min: 0 },
-      { section: 'terrain', id: 'rubble', key: 'dragModifier', label: '碎石阻力 +', step: 1, min: 0 },
-    ] as Field[]) box.append(this.stepper(rules, f));
+    for (const field of [
+      { section: 'chassis', id: chassisId, path: ['apQuota'], label: 'AP 配額', step: 1, min: 0 },
+      { section: 'chassis', id: chassisId, path: ['heatPassive'], label: '被動散熱', step: 1, min: 0 },
+    ] as Field[]) box.append(this.stepper(rules, field));
     body.append(box);
 
-    // 匯出
     const patch = this.host.patch();
     const json = JSON.stringify(patch, null, 1);
     const out = h('section', 'tune-box');
@@ -194,29 +208,30 @@ export class TuningPanel {
     body.append(out);
 
     body.append(h('p', 'tune-foot',
-      '操作：左盤按住看路徑、放開送出，滑出按鍵再放開 = 取消。每回合先加速（左盤）、再行動（右盤），按「待機」結束回合。'
-      + '地面驅動只能往機首前方三面推進，轉向在行動階段做 —— 所以這回合轉的向，決定下回合能往哪推。'
-      + '點地圖看地形與距離，拖曳平移，◎ 回中。桌機：QWE/ASD 六向、空白 巡航、X 制動、←→ 轉向、C 散熱、V 切換、Enter 待機。'));
+      '操作：左盤跟著機首排（上面那顆永遠是「前」）。往一個方向點幾下就加速幾，再按中間的確認；什麼都不點直接確認 = 不加速。'
+      + '點另一個方向 = 改選；同一方向點超過上限 = 歸零。地圖上機體周圍的數字是每個方向能點幾下。'
+      + '確認後機體移動，換右盤行動；AP 用完或按「待機」就推進回合。'
+      + '點地圖看地形與距離，拖曳平移，◎ 回中。'
+      + '桌機：W 前、E 右前、D 右後、S 後、A 左後、Q 左前、空白 確認；← → 轉向、C 散熱、V 切換、Enter 待機。'));
 
     this.root.replaceChildren(body);
   }
 
   private stepper(rules: Rules, f: Field): HTMLElement {
-    const table = rules[f.section] as unknown as Record<string, Record<string, number>>;
-    const base = (this.host.base()[f.section] as unknown as Record<string, Record<string, number>>)[f.id][f.key];
-    const value = table[f.id][f.key];
+    const tables = rules as unknown as Tree;
+    const baseTables = this.host.base() as unknown as Tree;
+    const value = getIn(tables[f.section], [f.id, ...f.path]);
+    const base = getIn(baseTables[f.section], [f.id, ...f.path]);
     const row = h('div', 'tune-row');
     row.append(h('span', 'tune-label', f.label));
     const minus = h('button', '', '−');
     minus.type = 'button';
-    minus.addEventListener('click', () => this.set(f.section, f.id, f.key, Math.max(f.min, value - f.step)));
+    minus.addEventListener('click', () => this.set(f, Math.max(f.min, value - f.step)));
     const plus = h('button', '', '+');
     plus.type = 'button';
-    plus.addEventListener('click', () => this.set(f.section, f.id, f.key, value + f.step));
-    const val = h('b', value === base ? 'tune-val' : 'tune-val changed', String(value));
-    row.append(minus, val, plus);
-    const notes = [f.note ? f.note(rules) : '', value === base ? '' : `預設 ${base}`].filter(Boolean);
-    row.append(h('small', 'tune-note', notes.join(' · ')));
+    plus.addEventListener('click', () => this.set(f, value + f.step));
+    row.append(minus, h('b', value === base ? 'tune-val' : 'tune-val changed', String(value)), plus);
+    row.append(h('small', 'tune-note', value === base ? '' : `預設 ${base}`));
     return row;
   }
 }

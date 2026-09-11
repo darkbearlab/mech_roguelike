@@ -4,8 +4,8 @@
  *
  * 「世界座標」以六角半徑 = 1 為單位；乘上 Camera.size 就是 CSS 像素。
  */
-import type { Dir, SubVec } from '../core/hex';
-import { DIR_VEC, SUB } from '../core/hex';
+import type { Dir } from '../core/hex';
+import { DIR_VEC } from '../core/hex';
 
 export const SQRT3 = Math.sqrt(3);
 
@@ -14,7 +14,7 @@ export interface Pt {
   y: number;
 }
 
-/** axial（可為小數）→ 世界座標。 */
+/** axial → 世界座標。q、r 可以是小數（位移動畫的中途）。 */
 export function axialToWorld(q: number, r: number): Pt {
   return { x: 1.5 * q, y: SQRT3 * (r + q / 2) };
 }
@@ -25,20 +25,9 @@ export function worldToAxial(x: number, y: number): { q: number; r: number } {
   return { q, r: y / SQRT3 - q / 2 };
 }
 
-export function subToWorld(p: SubVec): Pt {
-  return axialToWorld(p.q / SUB, p.r / SUB);
-}
-
 /** 方向 d 在畫面上的角度（弧度，0 = 向右、順時針為正；N = −90°）。 */
 export function dirAngle(d: Dir): number {
   const w = axialToWorld(DIR_VEC[d].q, DIR_VEC[d].r);
-  return Math.atan2(w.y, w.x);
-}
-
-/** 速度向量在畫面上的角度；零向量回傳 null。 */
-export function vecAngle(v: SubVec): number | null {
-  if (v.q === 0 && v.r === 0) return null;
-  const w = subToWorld(v);
   return Math.atan2(w.y, w.x);
 }
 
@@ -52,5 +41,8 @@ export function hexCorners(cx: number, cy: number, size: number): Pt[] {
   return out;
 }
 
-/** 方向箭頭字元，依方向編號。 */
+/** 絕對方向的箭頭字元（地圖方位），依方向編號。 */
 export const DIR_GLYPH = ['↑', '↗', '↘', '↓', '↙', '↖'] as const;
+
+/** 相對機首的方向名稱（左盤跟著機首排），依相對編號 0..5。 */
+export const REL_NAME = ['前', '右前', '右後', '後', '左後', '左前'] as const;

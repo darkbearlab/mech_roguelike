@@ -58,6 +58,32 @@
 
       <section id="tune-panel" class="sheet hidden"></section>
     </div>
+
+    <!-- 開機失敗的說明。樣式全部寫在行內：這個畫面出現時，style.css 多半也沒載入
+         （CSS 是由 main.ts import 的）。遊戲一啟動，main.ts 就把它移除。 -->
+    <div
+      id="boot-fail"
+      hidden
+      style="position:fixed;inset:0;z-index:100;background:#0b0e12;color:#d9e2ea;padding:24px 20px;font:15px/1.7 system-ui,sans-serif;overflow:auto"
+    >
+      <b style="color:#ffb347;font-size:17px">遊戲沒有啟動</b>
+      <p>
+        最常見的原因：GitHub Pages 發布的是 repo 裡<b>未建置的原始碼</b>，而不是 CI 建置出來的版本。
+      </p>
+      <p>
+        到 repo 的 <b>Settings → Pages → Build and deployment → Source</b>，選 <b>GitHub Actions</b>
+        （不是 Deploy from a branch），再到 <b>Actions</b> 分頁把「Deploy to GitHub Pages」重跑一次。
+      </p>
+      <p style="color:#8a9bab;font-size:13px">本機開發請用 <code>npm run dev</code>，不要直接打開 index.html。</p>
+    </div>
+    <script>
+      // 6 秒後遊戲還沒啟動就顯示上面的說明，而不是留一片空白。
+      // 網路慢時可能先閃出來 —— 遊戲一啟動就會被移除，所以不會卡住。
+      setTimeout(function () {
+        var el = document.getElementById('boot-fail');
+        if (el && !window.__game) el.hidden = false;
+      }, 6000);
+    </script>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

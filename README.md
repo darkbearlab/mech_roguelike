@@ -3,7 +3,9 @@
 日系人形機體、開闊地形、六角格向量移動的 roguelike。手機直向瀏覽器優先，TypeScript + Canvas 2D + Vite，零遊戲引擎相依。
 
 **線上版（手機直接開）**：https://darkbearlab.github.io/mech_roguelike/
-（第一次需要到 repo 的 **Settings → Pages → Source** 選 **GitHub Actions**，之後推到 `main` 就會自動部署。）
+（第一次需要到 repo 的 **Settings → Pages → Source** 選 **GitHub Actions**，之後推到 `main` 就會自動部署。
+選成 *Deploy from a branch* 的話，GitHub 會直接發布未建置的原始碼 —— 手機上只看到白畫面和兩顆沒有樣式的小按鈕，
+6 秒後頁面會自己跳出這段說明。）
 
 規格書：[`docs/spec-v0.1.md`](docs/spec-v0.1.md)
 

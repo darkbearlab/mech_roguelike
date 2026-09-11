@@ -131,6 +131,10 @@ const C = {
   tracerHit: '#ffe08a',
   tracerMiss: 'rgba(255,255,255,0.55)',
   threat: '#ff7b6b',
+  wall: '#262d36',
+  wallTop: '#343d48',
+  debris: '#4a3a28',
+  debrisEdge: '#6d5638',
 } as const;
 
 function tracePoly(ctx: CanvasRenderingContext2D, pts: Pt[]): void {
@@ -193,6 +197,27 @@ function drawTerrain(ctx: CanvasRenderingContext2D, map: GameMap, cam: Camera, v
         ctx.strokeStyle = C.trackEdge;
         ctx.lineWidth = 1;
         ctx.stroke();
+        break;
+      case 'wall':
+        // 牆：實心、頂面亮一點（看得出是擋路也擋視線的東西）
+        ctx.fillStyle = C.wall;
+        ctx.fill();
+        tracePoly(ctx, hexCorners(c.x, c.y - s * 0.08, s * 0.86));
+        ctx.fillStyle = C.wallTop;
+        ctx.fill();
+        break;
+      case 'debris':
+        // 殘骸：地面＋幾個箱子（半掩體，擋路不擋視線）
+        ctx.fillStyle = C.open;
+        ctx.fill();
+        ctx.fillStyle = C.debris;
+        ctx.strokeStyle = C.debrisEdge;
+        ctx.lineWidth = 1;
+        for (const [dx, dy, k] of [[-0.28, -0.12, 0.34], [0.2, -0.22, 0.26], [0.02, 0.24, 0.3]]) {
+          const w = s * k;
+          ctx.fillRect(c.x + dx * s - w / 2, c.y + dy * s - w / 2, w, w);
+          ctx.strokeRect(c.x + dx * s - w / 2, c.y + dy * s - w / 2, w, w);
+        }
         break;
       default:
         ctx.fillStyle = C.open;
@@ -398,8 +423,14 @@ function drawUnit(ctx: CanvasRenderingContext2D, sc: Scene, u: Unit): void {
   }
 
   const r = s * 0.42;
-  if (sc.state.rules.chassis[u.chassis].role === 'TARGET') {
+  const role = sc.state.rules.chassis[u.chassis].role;
+  // 還沒發現你的守衛：淡一點、頭上一個 z
+  const asleep = u.script?.kind === 'GUARD' && !u.script.awake;
+  if (asleep) ctx.globalAlpha = 0.6;
+  if (role === 'TARGET') {
     drawTargetBody(ctx, c, r, color, sc.state.rules.drives[u.drive].maxSpeed > 0);
+  } else if (role === 'ENEMY') {
+    drawTankBody(ctx, c, r, color, face);
   } else {
     // 機身
     ctx.beginPath();
@@ -417,6 +448,15 @@ function drawUnit(ctx: CanvasRenderingContext2D, sc: Scene, u: Unit): void {
     ctx.closePath();
     ctx.fillStyle = color;
     ctx.fill();
+  }
+
+  ctx.globalAlpha = 1;
+  if (asleep) {
+    ctx.fillStyle = C.reticleDim;
+    ctx.font = `italic bold ${Math.round(s * 0.36)}px system-ui, sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'bottom';
+    ctx.fillText('z', c.x + r * 1.1, c.y - r * 0.9);
   }
 
   if (u.shutdown > 0) {
@@ -444,6 +484,30 @@ function drawUnit(ctx: CanvasRenderingContext2D, sc: Scene, u: Unit): void {
     ctx.fillStyle = k > 0.34 ? C.hp : C.hpLow;
     ctx.fillRect(c.x - w / 2, y, w * k, 4);
   }
+}
+
+/** 戰車：方形車身、圓砲塔、砲管指著機首方向（跟人形機體一眼分得出來）。 */
+function drawTankBody(ctx: CanvasRenderingContext2D, c: Pt, r: number, color: string, face: number): void {
+  ctx.save();
+  ctx.translate(c.x, c.y);
+  ctx.rotate(face);
+  ctx.fillStyle = '#0b0e12';
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 2.5;
+  ctx.beginPath();
+  ctx.rect(-r * 0.95, -r * 0.8, r * 1.9, r * 1.6);
+  ctx.fill();
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(0, 0, r * 0.45, 0, Math.PI * 2);
+  ctx.fillStyle = color;
+  ctx.fill();
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(0, 0);
+  ctx.lineTo(r * 1.5, 0);
+  ctx.stroke();
+  ctx.restore();
 }
 
 /** 靶沒有機首：固定靶是靶心；會動的靶機是菱形（速度箭頭照樣畫，看得出往哪飛）。 */

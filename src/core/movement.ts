@@ -15,8 +15,8 @@
  *   結果夾在 0..極速。
  *
  * 然後沿速度方向筆直走「速率」格，逐格判定碰撞。
- * **地形目前不影響移動**（設計者 2026-09-11：先無視地形限制，之後再討論）——
- * 擋路的只有地圖邊緣與其他機體。
+ * 擋路的是地圖邊緣、開不進去的地形（地城的牆與殘骸）與其他機體；其他地形不影響移動
+ * （設計者 2026-09-11：先無視地形限制，之後再討論 —— 牆是地城需要的例外）。
  *
  * 這裡全是純函式。engine.ts 拿它來真的移動；介面拿它畫預測；bot 與日後的敵人 AI 拿它推演 ——
  * 走的是同一段程式碼，所以預測永遠等於實際。
@@ -156,9 +156,11 @@ export function worldOf(s: GameState, selfId: string): MotionWorld {
   return { rules: s.rules, map: s.map, unitAt: (h) => unitAt(s, h, selfId) };
 }
 
-/** 擋路的只有地圖邊緣與其他機體；地形目前不擋（先無視地形限制）。 */
+/** 擋路的：地圖邊緣、開不進去的地形（牆、殘骸）、其他機體。其他地形照舊不擋。 */
 function blockerAt(w: MotionWorld, h: Hex): { blocker: Blocker; unitId?: string } | null {
-  if (!cellAt(w.map, h)) return { blocker: 'EDGE' };
+  const cell = cellAt(w.map, h);
+  if (!cell) return { blocker: 'EDGE' };
+  if (!cell.passable) return { blocker: 'WALL' };
   const u = w.unitAt(h);
   if (u) return { blocker: 'UNIT', unitId: u.id };
   return null;

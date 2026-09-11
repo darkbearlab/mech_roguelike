@@ -6,7 +6,7 @@
  *          − 追蹤 × 相對速度          自己與目標的相對位移差（主因；追蹤係數是火控的）
  *          − 重量 × 自己的速度        越重的武器高速時越不準
  *          − 角度                      偏離機首越多越難打（每 30° 一格，現在全 0）
- *          − 掩體                      地形還不影響任何事，先 0
+ *          − 掩體                      半掩體（視線上緊貼目標的那一格，例如地城的殘骸）；全掩體（牆、稜線）直接擋視線
  *          − 電戰                      還沒有電戰系統，先 0
  *   夾在 combat.minHit ～ combat.maxHit。
  *
@@ -17,7 +17,9 @@
  * 明細（terms）逐項列出來 —— 介面照著顯示，玩家才知道為什麼打不中。
  */
 import type { Dir, Hex } from './hex';
-import { DIR_VEC, hexDist, hexLen, offAxisDegrees, scale, sub } from './hex';
+import { DIR_VEC, hexDist, hexLen, hexLine, offAxisDegrees, scale, sub } from './hex';
+import type { GameMap } from './map';
+import { cellAt } from './map';
 import type { FireControlDef, Rules, WeaponDef } from './rules';
 import type { GameState, Unit } from './state';
 
@@ -74,9 +76,29 @@ export function arcBand(offAxis: number, table: number[]): number {
   return table[Math.min(table.length - 1, Math.floor(offAxis / 30))];
 }
 
-/** 命中率與明細。不檢查射程、射界（那是 shotCheck 的事）。 */
+/**
+ * 視線：兩格之間（不含兩端）有擋視線的地形（稜線、牆）就看不到。其他機體不擋。
+ * 直線剛好擦過格子交界時，A→B 與 B→A 取的格子可能不同 —— 兩條任一條通就算看得到，
+ * 所以視線是對稱的：你看得到它，它就看得到你。
+ */
+export function lineOfSight(map: GameMap, a: Hex, b: Hex): boolean {
+  const clear = (line: Hex[]) => line.every((h, i) => i === 0 || i === line.length - 1 || !cellAt(map, h)?.blocksLos);
+  return clear(hexLine(a, b)) || clear(hexLine(b, a));
+}
+
+/** 半掩體：視線上緊貼目標的那一格（或目標自己站的格）有 cover → 扣最大的那個。 */
+export function coverOf(map: GameMap, from: Hex, to: Hex): number {
+  const line = hexLine(from, to);
+  let best = cellAt(map, to)?.cover ?? 0;
+  for (let i = 1; i < line.length - 1; i++) {
+    if (hexDist(line[i], to) === 1) best = Math.max(best, cellAt(map, line[i])?.cover ?? 0);
+  }
+  return best;
+}
+
+/** 命中率與明細。不檢查射程、射界、視線（那是 shotCheck 的事）；cover = 目標的半掩體扣幾點。 */
 export function hitChance(
-  rules: Rules, fc: FireControlDef, w: WeaponDef, shooter: Unit, target: Unit,
+  rules: Rules, fc: FireControlDef, w: WeaponDef, shooter: Unit, target: Unit, cover = 0,
 ): { chance: number; terms: HitTerm[] } {
   const rel = relativeSpeed(shooter, target);
   const off = offAxisDegrees(shooter.pos, shooter.facing, target.pos);
@@ -88,7 +110,7 @@ export function hitChance(
     { key: 'RELATIVE', label: `相對速度 ${rel} × 追蹤 ${fc.tracking}`, value: -fc.tracking * rel },
     { key: 'WEIGHT', label: `自身速度 ${shooter.speed} × 重量 ${w.weight}`, value: -w.weight * shooter.speed },
     { key: 'ARC', label: `偏離機首 ${Math.round(off)}°`, value: -arcBand(off, w.arcPenalty) },
-    { key: 'COVER', label: '掩體（地形尚未接線）', value: 0 },
+    { key: 'COVER', label: cover > 0 ? '目標在半掩體後' : '沒有掩體', value: cover > 0 ? -cover : 0 },
     { key: 'EW', label: '電戰（尚無系統）', value: 0 },
   ];
   const raw = terms.reduce((a, t) => a + t.value, 0);
@@ -102,16 +124,19 @@ export function inArc(w: WeaponDef, offAxis: number): boolean {
 }
 
 /**
- * 射界 × 射程涵蓋的每一格（不含自己那格；不管地圖邊界）。介面照這個畫扇形 ——
+ * 射界 × 射程涵蓋的每一格（不含自己那格）。介面照這個畫扇形 ——
  * 與 shotCheck 用同一條規則，畫面上亮的格子就是打得到的格子。
+ * 給了 map 就只留地圖上、站得了人、看得到的格子（牆後面的不亮）。
  */
-export function arcHexes(w: WeaponDef, pos: Hex, facing: Dir): Hex[] {
+export function arcHexes(w: WeaponDef, pos: Hex, facing: Dir, map?: GameMap): Hex[] {
   const out: Hex[] = [];
   for (let dq = -w.range; dq <= w.range; dq++) {
     for (let dr = Math.max(-w.range, -dq - w.range); dr <= Math.min(w.range, -dq + w.range); dr++) {
       if (dq === 0 && dr === 0) continue;
       const h = { q: pos.q + dq, r: pos.r + dr };
-      if (inArc(w, offAxisDegrees(pos, facing, h))) out.push(h);
+      if (!inArc(w, offAxisDegrees(pos, facing, h))) continue;
+      if (map && !(cellAt(map, h)?.passable && lineOfSight(map, pos, h))) continue;
+      out.push(h);
     }
   }
   return out;
@@ -130,8 +155,9 @@ export function shotCheck(s: GameState, shooter: Unit, target: Unit): ShotCheck 
   if (target.side === shooter.side) return fail('不能打自己人');
   if (distance > w.range) return fail(`超出射程（${distance} 格 > ${w.range}）`);
   if (!inArc(w, offAxis)) return fail(`不在射界內（偏離機首 ${Math.round(offAxis)}°，射界 ±${w.arcDegrees / 2}°）`);
+  if (!lineOfSight(s.map, shooter.pos, target.pos)) return fail('視線被擋住了');
   if (shooter.ammo <= 0) return fail('沒子彈了：先裝填');
-  return { ok: true, distance, offAxis, ...hitChance(s.rules, fc, w, shooter, target) };
+  return { ok: true, distance, offAxis, ...hitChance(s.rules, fc, w, shooter, target, coverOf(s.map, shooter.pos, target.pos)) };
 }
 
 /** 這個射手現在打得到的目標，命中率高的在前。 */

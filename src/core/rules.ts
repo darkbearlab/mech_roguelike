@@ -46,8 +46,8 @@ export interface DriveDef {
 export interface ChassisDef {
   id: string;
   name: string;
-  /** PILOT = 玩家可以選來開的機體；TARGET = 靶，只會出現在地圖上。 */
-  role: 'PILOT' | 'TARGET';
+  /** PILOT = 玩家可以選來開的機體；TARGET = 靶；ENEMY = 只當敵人的機體（例如地城的輕戰車）。後兩種只會出現在地圖上。 */
+  role: 'PILOT' | 'TARGET' | 'ENEMY';
   /** 第一個是出擊時的驅動模式。 */
   drives: string[];
   apQuota: number;
@@ -125,13 +125,20 @@ export interface EconomyDef {
   heatWarnAbove: number;
 }
 
-/** 地形。目前只有外觀與日後視線用的資料 —— 地形不影響移動（先無視地形限制，之後再討論）。 */
+/**
+ * 地形。原本的地形（碎石、稜線、高地）照舊不影響移動；地城起有了開不進去的牆與殘骸。
+ */
 export interface TerrainDef {
   id: string;
   name: string;
   glyph: string;
   elevation: number;
+  /** 擋視線（全掩體）。 */
   blocksLos: boolean;
+  /** false = 開不進去（撞上就停）。預設 true。 */
+  passable: boolean;
+  /** 半掩體：視線上緊貼目標的那一格是這種地形時，命中扣幾點。預設 0。 */
+  cover: number;
 }
 
 export interface CombatDef {
@@ -259,7 +266,7 @@ export function loadRules(raw: RawRules): Rules {
   for (const [id, o] of entries(raw.chassis)) {
     const c = strip<ChassisDef>(o, id);
     c.role = c.role ?? 'PILOT';
-    if (c.role !== 'PILOT' && c.role !== 'TARGET') errors.push(`chassis.${id}.role 必須是 PILOT 或 TARGET`);
+    if (c.role !== 'PILOT' && c.role !== 'TARGET' && c.role !== 'ENEMY') errors.push(`chassis.${id}.role 必須是 PILOT、TARGET 或 ENEMY`);
     int(`chassis.${id}.apQuota`, c.apQuota, 0);
     num(`chassis.${id}.heatCap`, c.heatCap, 1);
     num(`chassis.${id}.heatPassive`, c.heatPassive, 0);
@@ -318,6 +325,10 @@ export function loadRules(raw: RawRules): Rules {
     glyphs.add(t.glyph);
     bool(`terrain.${id}.blocksLos`, t.blocksLos);
     int(`terrain.${id}.elevation`, t.elevation);
+    t.passable = t.passable ?? true;
+    bool(`terrain.${id}.passable`, t.passable);
+    t.cover = t.cover ?? 0;
+    num(`terrain.${id}.cover`, t.cover, 0);
     terrain[id] = t;
   }
 

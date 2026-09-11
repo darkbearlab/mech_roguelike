@@ -77,7 +77,7 @@ export function duelGoal(s: GameState, u: Unit, foe: Unit): Hex {
   const order: number[] = far ? [0, 1, -1, 2, -2, 3] : [1, -1, 2, -2, 0, 3];
   for (const k of order) {
     const g = add(foe.pos, scale(DIR_VEC[rotate(bearing, k)], want));
-    if (cellAt(s.map, g)) return g;
+    if (cellAt(s.map, g)?.passable) return g;
   }
   return foe.pos;
 }

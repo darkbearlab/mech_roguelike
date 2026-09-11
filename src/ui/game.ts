@@ -25,7 +25,7 @@ import { accelLegality, driveOf, maxTaps, resolveMotion, worldOf } from '../core
 import type { MotionResult } from '../core/movement';
 import type { Rules, RulesPatch } from '../core/rules';
 import { RULES, withPatch } from '../core/rules';
-import { rawMapById } from '../core/content';
+import { DUNGEON_ID, rawMapById, rawMapFor } from '../core/content';
 import type { AccelOrder, Command, GameEvent, GameState, RelDir, Unit } from '../core/state';
 import { activeUnit, currentStep, playerUnit, unitById } from '../core/state';
 import type { Camera, SafeArea, WorldBounds } from '../render/camera';
@@ -81,6 +81,8 @@ export class Game {
   private chassis: string;
   private mapId: string;
   private rival: string | null;
+  /** 地城的版面種子：同一個種子同一張圖（重跑不換圖；在 ⚙ 再點一次地城才換）。 */
+  private layoutSeed: number;
   /** 演出用的延遲提示（例如敵機的子彈飛到了才說「被擊中」）。重開時全部取消。 */
   private timers: number[] = [];
   /** 上一批事件的演出排到什麼時候結束（performance.now 的時間）。 */
@@ -117,6 +119,7 @@ export class Game {
     this.chassis = opts.chassis;
     this.mapId = opts.mapId;
     this.rival = opts.rival;
+    this.layoutSeed = opts.seed;
     this.pads = new Pads($('move-pad'), $('func-pad'), {
       tap: (rel) => this.tap(rel as RelDir),
       turn: (delta) => this.turnTap(delta),
@@ -139,6 +142,8 @@ export class Game {
         this.restart();
       },
       setMap: (id) => {
+        // 地城：每點一次換一張（新的版面種子）
+        if (id === DUNGEON_ID) this.layoutSeed = (Date.now() ^ (Math.random() * 0x7fffffff)) >>> 0;
         this.mapId = id;
         this.savePrefs();
         this.rebuildRules();
@@ -186,7 +191,7 @@ export class Game {
 
   private rebuildRules(): void {
     this.rules = withPatch(RULES, this.patch);
-    const raw = rawMapById(this.mapId) ?? rawMapById('proving_ground')!;
+    const raw = rawMapFor(this.mapId, this.layoutSeed) ?? rawMapById('proving_ground')!;
     this.map = loadMap(this.rules, raw);
     // 決鬥場：換成選的對手
     const rivalUnit = duelists(this.map)[0];
@@ -390,8 +395,9 @@ export class Game {
     return `${head} —— 命中 ${chk.chance}%${clamp}：${parts.join('、')}`;
   }
 
+  /** 場上的靶與敵人（射擊場的靶、地城的戰車……）：總共幾個、打爆了幾個。 */
   private targetCount(): { total: number; killed: number } {
-    const ts = this.state.units.filter((u) => this.rules.chassis[u.chassis].role === 'TARGET');
+    const ts = this.state.units.filter((u) => u.side === 'ENEMY');
     return { total: ts.length, killed: ts.filter((u) => !u.alive).length };
   }
 
@@ -453,8 +459,8 @@ export class Game {
         case 'DESTROYED': {
           const u = unitById(this.state, e.unitId)!;
           this.fx.float(u.pos, '擊毀', '#ff6b5a', busy, a.floatMs);
-          // 靶：報一下進度。敵機或自己被打爆 = 分出勝負，由 result() 說
-          if (e.by === 'player' && this.rules.chassis[u.chassis].role === 'TARGET') {
+          // 靶與地城的敵人：報一下進度。決鬥的敵機或自己被打爆 = 分出勝負，由 result() 說
+          if (e.by === 'player' && this.rules.chassis[u.chassis].role !== 'PILOT') {
             const n = this.targetCount();
             this.hud.toast(`💥 擊毀${this.rules.chassis[u.chassis].name}（${n.killed}／${n.total}）`, 'info');
           }
@@ -469,8 +475,18 @@ export class Game {
           this.fx.float(u.pos, '出現', '#ff6b5a', busy, a.floatMs * 1.5);
           break;
         }
+        case 'ALERTED': {
+          // 守衛醒了：頭上一個「！」；看到你的那一刻說一聲（被打醒的不必說，你自己知道）
+          const u = unitById(this.state, e.unitId)!;
+          this.fx.float(u.pos, '！', '#ff6b5a', busy, a.floatMs * 1.5);
+          if (e.why === 'SPOTTED') {
+            const name = this.rules.chassis[u.chassis].name;
+            this.later(busy - now, () => this.hud.toast(`⚠ ${name}發現你了`, 'bad'));
+          }
+          break;
+        }
         case 'COLLIDED': {
-          const what = e.collision.blocker === 'EDGE' ? '地圖邊緣' : '其他機體';
+          const what = e.collision.blocker === 'EDGE' ? '地圖邊緣' : e.collision.blocker === 'WALL' ? '牆' : '其他機體';
           this.hud.toast(`撞上${what}（${e.collision.speed} 速）— 速度歸零`, 'bad');
           break;
         }
@@ -766,7 +782,8 @@ export class Game {
     const w = weaponOf(this.rules, this.me());
     if (!w || this.state.over || !this.state.units.some((x) => x.alive && x.side !== 'PLAYER')) return null;
     const v = this.shooter();
-    return arcHexes(w, v.pos, v.facing).map((hex) => ({ hex, optimal: inOptimal(w, hexDist(v.pos, hex)) }));
+    // 牆後面的格子不亮：跟 shotCheck 同一條視線規則
+    return arcHexes(w, v.pos, v.facing, this.map).map((hex) => ({ hex, optimal: inOptimal(w, hexDist(v.pos, hex)) }));
   }
 
   private targetView(): TargetView | null {
@@ -902,7 +919,12 @@ export class Game {
     if (unit) return this.selectTarget(unit);
     this.picked = hex;
     const t = this.rules.terrain[cell.terrain];
-    this.hud.toast(`${t.name} · 距離 ${hexDist(this.me().pos, hex)} · 高度 ${cell.elevation}（地形目前不影響移動）`);
+    const traits = [
+      cell.passable ? '開得過去' : '開不進去',
+      cell.blocksLos ? '擋視線' : '',
+      cell.cover > 0 ? `半掩體 −${cell.cover}` : '',
+    ].filter(Boolean).join(' · ');
+    this.hud.toast(`${t.name} · 距離 ${hexDist(this.me().pos, hex)} · ${traits}`);
   }
 
   // ---------------------------------------------------------------- 畫面

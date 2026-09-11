@@ -21,11 +21,11 @@
  * 自動單位（control = SCRIPT：靶與敵機）的階段由引擎照腳本直接走完，不等指令。
  * 敵機（腳本 DUEL）的行動由 ai.ts 一個一個挑，走的是和玩家同一段 checkLegal / perform。
  */
-import { shotCheck, weaponOf } from './combat';
+import { lineOfSight, shotCheck, weaponOf } from './combat';
 import { advanceCourse, hooksOf, newProgress } from './course';
 import type { CourseHook, HookWhen } from './course';
 import type { Dir, Hex } from './hex';
-import { rotate } from './hex';
+import { hexDist, rotate } from './hex';
 import type { GameMap, UnitSpawn } from './map';
 import { addHeat, checkAp, passiveCool, payQuota, spendAp } from './economy';
 import { accelHeat, accelLegality, driveOf, resolveMotion, worldOf } from './movement';
@@ -33,7 +33,7 @@ import { ORDERS } from './order';
 import { createRng, nextFloat } from './rng';
 import type { Rules } from './rules';
 import { duelAction } from './ai';
-import { scriptDeclare } from './script';
+import { hunting, scriptDeclare } from './script';
 import type { AccelOrder, Command, GameEvent, GameState, Side, Step, Unit } from './state';
 import { activeUnit, currentStep, unitById } from './state';
 
@@ -327,6 +327,11 @@ function perform(n: GameState, u: Unit, cmd: ActionCommand, legal: Legal, ev: Ga
           ev.push({ type: 'DESTROYED', unitId: target.id, by: u.id });
         }
       }
+      // 守衛被打（打中打不中都算 —— 槍聲）就醒了
+      if (target.alive && target.script?.kind === 'GUARD' && !target.script.awake) {
+        target.script.awake = true;
+        ev.push({ type: 'ALERTED', unitId: target.id, why: 'SHOT' });
+      }
       heat(n, u, w.fire.heat, ev);
       break;
     }
@@ -401,6 +406,7 @@ function arrive(s: GameState, step: Step, ev: GameEvent[]): boolean {
       }
       // 自動單位：照腳本宣告機動（轉向＋加速），跟玩家同一套合法性與結算
       if (u.control === 'SCRIPT') {
+        wake(s, u, ev);
         const d = scriptDeclare(s, u);
         // 腳本只會挑合法的宣告；萬一不合法（例如調參改出來的組合）就當作不轉、不加速
         const ok = checkLegal(s, { type: 'ACCEL', order: d.order, turn: d.turn }).ok;
@@ -424,8 +430,8 @@ function arrive(s: GameState, step: Step, ev: GameEvent[]): boolean {
         endPhase(u, 'SHUTDOWN', ev);
         return true;
       }
-      // 敵機：照 AI 行動（跟玩家同一套規則）
-      if (u.script?.kind === 'DUEL') {
+      // 敵機（含醒了的守衛）：照 AI 行動（跟玩家同一套規則）
+      if (hunting(u)) {
         runAi(s, u, ev);
         return true;
       }
@@ -445,6 +451,18 @@ function arrive(s: GameState, step: Step, ev: GameEvent[]): boolean {
       world(s);
       return s.over === null;
   }
+}
+
+/** 守衛：感測距離內看得到對手（不算靶）就醒來。被打醒的在 FIRE 那裡處理。 */
+function wake(s: GameState, u: Unit, ev: GameEvent[]): void {
+  const sc = u.script;
+  if (sc?.kind !== 'GUARD' || sc.awake) return;
+  const range = s.rules.chassis[u.chassis].sensorRange;
+  const seen = s.units.some((o) => o.alive && o.side !== u.side && s.rules.chassis[o.chassis].role !== 'TARGET'
+    && hexDist(o.pos, u.pos) <= range && lineOfSight(s.map, u.pos, o.pos));
+  if (!seen) return;
+  sc.awake = true;
+  ev.push({ type: 'ALERTED', unitId: u.id, why: 'SPOTTED' });
 }
 
 function beginPhase(s: GameState, u: Unit, ev: GameEvent[]): void {
@@ -548,13 +566,15 @@ function world(s: GameState): void {
 }
 
 /**
- * 勝敗判定。玩家陣亡 → 敵方勝；跑完跑道、或開局有敵人且全滅 → 玩家勝。
- * 靶（role TARGET）不算敵人：打光射擊場的靶不會提早結束，終點才是終點。
+ * 勝敗判定。玩家陣亡 → 敵方勝；跑完跑道 → 玩家勝。
+ * 有跑道的地圖（跑道、射擊場、地城）只有終點算數：把敵人打光不會提早結束。
+ * 沒有跑道的地圖（決鬥場）：開局有敵人且全滅 → 玩家勝。靶（role TARGET）不算敵人。
  * 沒有跑道也沒有敵人（試驗場）是自由移動，永遠不結束。
  */
 export function judge(s: GameState): GameState['over'] {
   if (!s.units.some((u) => u.side === 'PLAYER' && u.alive)) return { winner: 'ENEMY' };
   if (s.course?.done != null) return { winner: 'PLAYER' };
+  if (s.map.course) return null;
   const enemies = s.units.filter((u) => u.side === 'ENEMY' && s.rules.chassis[u.chassis].role !== 'TARGET');
   if (enemies.length > 0 && enemies.every((u) => !u.alive)) return { winner: 'PLAYER' };
   return null;

@@ -11,9 +11,9 @@ function raw(mut: (r: RawRules) => void): RawRules {
 describe('資料檔讀取', () => {
   it('預設資料讀得進來，註解鍵被略過', () => {
     expect(Object.keys(RULES.drives).sort()).toEqual(['drone', 'jet', 'static', 'tracked', 'walker']);
-    expect(Object.keys(RULES.chassis).sort()).toEqual(['drone', 'hy1', 'jt1', 'target', 'tk1', 'wk1']);
+    expect(Object.keys(RULES.chassis).sort()).toEqual(['drone', 'hy1', 'jt1', 'tank', 'target', 'tk1', 'wk1']);
     expect(Object.keys(RULES.weapons)).toEqual(['rifle']);
-    expect(Object.keys(RULES.terrain).sort()).toEqual(['highland', 'open', 'ridge', 'rubble', 'track']);
+    expect(Object.keys(RULES.terrain).sort()).toEqual(['debris', 'highland', 'open', 'ridge', 'rubble', 'track', 'wall']);
     expect(Object.keys(RULES.actions).sort()).toEqual([...ACTION_IDS].sort());
     for (const d of Object.values(RULES.drives)) expect(Object.keys(d).some((k) => k.startsWith('_'))).toBe(false);
     expect('id' in RULES.economy).toBe(false);

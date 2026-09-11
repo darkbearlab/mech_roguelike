@@ -25,6 +25,8 @@ function readChassis(): string {
 
 const seed = readSeed();
 const game = new Game({ seed, chassis: readChassis(), mapId: params.get('map') ?? 'proving_ground' });
+// index.html 的開機失敗說明：走到這裡就代表成功了
+document.getElementById('boot-fail')?.remove();
 
 Object.assign(window as unknown as Record<string, unknown>, { __game: game, __seed: seed, __build: BUILD_ID });
 console.info('[mech] build =', BUILD_ID, '/ seed =', seed);

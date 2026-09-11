@@ -2,33 +2,36 @@
  * 介面接線：輸入 → 指令 → core → 事件 → 演出與畫面。
  *
  * 規則全在 core/。這裡只做三件事：把按鍵翻成 Command、把 GameEvent 翻成動畫與提示、
- * 以及從 core 的純函式（checkLegal / resolveMotion）拿預測來畫幽靈標記 ——
+ * 以及從 core 的純函式（checkLegal / resolveMotion）拿預測來畫 ——
  * 預測與實際走的是同一段程式碼，所以畫面上的落點就是按下去之後的落點。
+ *
+ * 左盤的「點了哪個方向、點了幾下」是介面狀態（還沒確認），放在這裡，不進 GameState。
  */
 import { applyCommand, checkLegal, newGame, turnPrice } from '../core/engine';
-import type { Hex, SubVec } from '../core/hex';
-import { hexDist, hexLen, hexRound, subToHex } from '../core/hex';
+import type { Hex } from '../core/hex';
+import { hexDist, hexRound } from '../core/hex';
 import type { GameMap } from '../core/map';
 import { cellAt, loadMap } from '../core/map';
-import { ALL_CHOICES, choiceFromKey, choiceKey, resolveMotion, worldOf } from '../core/movement';
+import { accelLegality, driveOf, maxTaps, resolveMotion, worldOf } from '../core/movement';
+import type { MotionResult } from '../core/movement';
 import type { Rules, RulesPatch } from '../core/rules';
 import { RULES, withPatch } from '../core/rules';
 import { rawMapById } from '../core/content';
-import type { Command, GameEvent, GameState, Unit } from '../core/state';
+import type { AccelOrder, Command, GameEvent, GameState, RelDir, Unit } from '../core/state';
 import { activeUnit, currentStep, playerUnit } from '../core/state';
 import type { Camera, SafeArea, WorldBounds } from '../render/camera';
 import { computeCamera, effectivePan, hexSizeFor, mapBounds, screenToWorld } from '../render/camera';
 import type { Pt } from '../render/geometry';
-import { DIR_GLYPH, dirAngle, subToWorld, worldToAxial } from '../render/geometry';
+import { DIR_GLYPH, REL_NAME, axialToWorld, dirAngle, worldToAxial } from '../render/geometry';
 import { Motion } from '../render/motion';
-import type { Ghost } from '../render/renderer';
-import { draw, speedText } from '../render/renderer';
+import type { Preview, RelHint } from '../render/renderer';
+import { draw } from '../render/renderer';
 import type { Cockpit, PadKey } from './config';
 import { UI } from './config';
 import { $ } from './dom';
 import { Hud } from './hud';
 import { Pads } from './pads';
-import type { FuncKeyView, MoveKeyView } from './pads';
+import type { ConfirmView, FuncKeyView, MoveKeyView } from './pads';
 import { TuningPanel, loadPatch } from './tuning';
 
 export interface GameOptions {
@@ -42,9 +45,16 @@ const FUNC_LABEL: Record<PadKey, string> = {
   swap: '換武器', cool: '散熱', switchDrive: '換驅動', wait: '待機',
 };
 
-/** 第 5 步才接線的武器鍵：先按 actions.json 顯示成本，但不能按。 */
+/** 相對機首方向的箭頭：左盤跟著機首排，所以「前」永遠是 ↑。 */
+const REL_GLYPH = ['↑', '↗', '↘', '↓', '↙', '↖'] as const;
+
+/** 還沒接線的武器鍵：先按 actions.json 顯示成本，但不能按。 */
 const WEAPON_ACTION: Partial<Record<PadKey, keyof Rules['actions']>> = {
   lock: 'lock', fire: 'fireLight', reload: 'reload', swap: 'swap',
+};
+
+const KIND_TEXT: Record<MotionResult['kind'], string> = {
+  COAST: '不加速', START: '起步', PUSH: '加速', VEER60: '轉 60°', VEER120: '轉 120°', BRAKE: '煞車',
 };
 
 export class Game {
@@ -68,20 +78,17 @@ export class Game {
 
   private pan: Pt = { x: 0, y: 0 };
   private picked: Hex | null = null;
-  private previewKey: string | null = null;
-  private ghostCache: { state: GameState; ghosts: Ghost[] } | null = null;
-  private trail: SubVec[] = [];
+  /** 左盤目前的選擇（還沒確認）。 */
+  private sel: AccelOrder = null;
+  private trail: Hex[] = [];
   private dirty = true;
   private wasAnimating = false;
 
   constructor(private opts: GameOptions) {
     this.chassis = opts.chassis;
     this.pads = new Pads($('move-pad'), $('func-pad'), {
-      preview: (k) => {
-        this.previewKey = k;
-        this.dirty = true;
-      },
-      accel: (k) => this.dispatch({ type: 'ACCEL', choice: choiceFromKey(k) }),
+      tap: (rel) => this.tap(rel as RelDir),
+      confirm: () => this.confirm(),
       action: (k) => this.pressFunc(k),
       refused: (reason) => this.hud.toast(reason, 'warn'),
     });
@@ -114,6 +121,7 @@ export class Game {
     this.trail = [];
     this.pan = { x: 0, y: 0 };
     this.picked = null;
+    this.sel = null;
     this.motion.finish();
     this.pads.buildFunc(this.cockpit().pad);
     this.refresh();
@@ -122,7 +130,6 @@ export class Game {
   private rebuildRules(): void {
     this.rules = withPatch(RULES, this.patch);
     const raw = rawMapById(this.opts.mapId) ?? rawMapById('proving_ground')!;
-    // 地形阻力是讀圖時烘進格子的，所以調了地形就要重讀地圖（幾何不變）
     this.map = loadMap(this.rules, raw);
     this.bounds = mapBounds(this.map);
   }
@@ -132,12 +139,37 @@ export class Game {
     this.patch = p;
     this.rebuildRules();
     this.state = { ...this.state, rules: this.rules, map: this.map };
-    this.ghostCache = null;
+    // 上限可能變小了：選擇超出新上限就清掉
+    if (this.sel && this.sel.taps > maxTaps(driveOf(this.rules, this.me()), this.sel.rel)) this.sel = null;
     this.refresh();
   }
 
   private cockpit(): Cockpit {
     return UI.cockpits[this.rules.chassis[this.chassis].cockpit];
+  }
+
+  // ---------------------------------------------------------------- 左盤
+
+  /** 點一個方向：同方向 +1（超過上限歸零）；別的方向 = 改選、從 1 開始。 */
+  private tap(rel: RelDir): void {
+    const u = this.me();
+    const max = maxTaps(driveOf(this.rules, u), rel);
+    if (max === 0) {
+      this.hud.toast(accelLegality(this.rules, u, { rel, taps: 1 }).reason ?? '這個方向推不動', 'warn');
+      return;
+    }
+    if (this.sel && this.sel.rel === rel) {
+      this.sel = this.sel.taps + 1 > max ? null : { rel, taps: this.sel.taps + 1 };
+    } else {
+      this.sel = { rel, taps: 1 };
+    }
+    this.refresh();
+  }
+
+  private confirm(): void {
+    const order = this.sel;
+    this.sel = null;
+    this.dispatch({ type: 'ACCEL', order });
   }
 
   // ---------------------------------------------------------------- 指令
@@ -146,6 +178,7 @@ export class Game {
     const legal = checkLegal(this.state, cmd);
     if (!legal.ok) {
       this.hud.toast(legal.reason ?? '不能這樣做', 'warn');
+      this.refresh();
       return;
     }
     const { state, events } = applyCommand(this.state, cmd);
@@ -163,7 +196,7 @@ export class Game {
       case 'cool': return this.dispatch({ type: 'COOL' });
       case 'switchDrive': return this.dispatch({ type: 'SWITCH_DRIVE' });
       case 'wait': return this.dispatch({ type: 'WAIT' });
-      default: this.hud.toast('第 5 步才接線（單一武器與命中公式）', 'info');
+      default: this.hud.toast('武器還沒接線', 'info');
     }
   }
 
@@ -174,12 +207,10 @@ export class Game {
     for (const e of events) {
       switch (e.type) {
         case 'MOVED': {
-          const hexes = Math.max(0, e.path.length - 1);
-          const dur = Math.min(a.maxMoveMs, Math.max(a.minMoveMs, hexes * a.msPerHex));
+          const hexes = e.path.length - 1;
           const bump = events.some((x) => x.type === 'COLLIDED' && x.unitId === e.unitId);
-          const moved = hexLen({ q: e.to.q - e.from.q, r: e.to.r - e.from.r }) > 0;
-          if (moved) this.motion.move(e.unitId, e.from, e.to, now, dur, bump);
-          if (e.unitId === 'player') {
+          if (hexes > 0) this.motion.move(e.unitId, e.from, e.to, now, Math.min(a.maxMoveMs, hexes * a.msPerHex), bump);
+          if (e.unitId === 'player' && hexes > 0) {
             this.trail.push(e.from);
             if (this.trail.length > UI.preview.trailLength) this.trail.shift();
           }
@@ -189,18 +220,23 @@ export class Game {
           this.motion.turn(e.unitId, dirAngle(e.from), dirAngle(e.to), now, a.turnMs);
           break;
         case 'COLLIDED': {
-          const what = e.collision.blocker === 'EDGE' ? '地圖邊緣' : e.collision.blocker === 'UNIT' ? '其他機體' : '稜線';
-          this.hud.toast(`撞上${what}（${(e.collision.speed / 10).toFixed(1)} 格/回）— 速度歸零`, 'bad');
+          const what = e.collision.blocker === 'EDGE' ? '地圖邊緣' : '其他機體';
+          this.hud.toast(`撞上${what}（${e.collision.speed} 速）— 速度歸零`, 'bad');
           break;
         }
         case 'OVERHEAT':
-          this.hud.toast('過熱！強制停機：這回合剩下的行動取消，下回合只能滑行', 'bad');
+          this.hud.toast('過熱！強制停機：這回合剩下的行動取消，下回合不能加速', 'bad');
           break;
         case 'REBOOT':
           this.hud.toast('重新開機', 'info');
           break;
         case 'DRIVE':
           this.hud.toast('驅動切換：' + this.rules.drives[e.drive].name, 'info');
+          break;
+        case 'PHASE_END':
+          if (e.unitId !== 'player') break;
+          if (e.reason === 'AP_SPENT') this.hud.toast('AP 用完，推進回合', 'info');
+          if (e.reason === 'OVERDRAFT') this.hud.toast(`透支：行動已結算，推進回合（下回合 AP −${this.me().debt}）`, 'warn');
           break;
         default:
           break;
@@ -224,41 +260,21 @@ export class Game {
     return !!u && u.side === 'PLAYER' && currentStep(this.state)?.kind === 'ACT';
   }
 
-  /** 八個選項的預測。每個狀態只算一次。 */
-  private ghosts(): Ghost[] {
-    if (this.ghostCache?.state === this.state) return this.ghostCache.ghosts;
-    const s = this.state;
-    const u = this.me();
-    const w = worldOf(s, u.id);
-    const ghosts = ALL_CHOICES.map((c): Ghost => {
-      const m = resolveMotion(w, u, c);
-      return {
-        key: choiceKey(c),
-        glyph: c.kind === 'DIR' ? DIR_GLYPH[c.dir] : c.kind === 'CRUISE' ? '○' : '■',
-        pos: m.posSub,
-        vel: m.velSub,
-        path: m.path,
-        collision: m.collision?.at ?? null,
-        legal: checkLegal(s, { type: 'ACCEL', choice: c }).ok,
-      };
-    });
-    this.ghostCache = { state: s, ghosts };
-    return ghosts;
+  /** 左盤目前的選擇會發生什麼。 */
+  private predict(): MotionResult {
+    return resolveMotion(worldOf(this.state, 'player'), this.me(), this.sel);
   }
 
-  /** 巡航預測：從 base 開始照速度滑行幾回合（撞到就停）。 */
-  private drift(base: { pos: SubVec; vel: SubVec }): SubVec[] {
-    const s = this.state;
-    const w = worldOf(s, 'player');
-    let u: Unit = { ...this.me(), posSub: base.pos, velSub: base.vel };
-    const out: SubVec[] = [];
-    for (let i = 0; i < UI.preview.driftTurns; i++) {
-      const m = resolveMotion(w, u, { kind: 'CRUISE' });
-      // 已經停了（或撞停在原地）就不再畫同一個點
-      if (m.posSub.q === u.posSub.q && m.posSub.r === u.posSub.r) break;
-      out.push(m.posSub);
-      if (m.collision || hexLen(m.velSub) === 0) break;
-      u = { ...u, posSub: m.posSub, velSub: m.velSub };
+  /** 滑行預測：從 base 開始都不加速，再滑幾回合（停了或撞了就停）。 */
+  private drift(base: MotionResult): Hex[] {
+    const w = worldOf(this.state, 'player');
+    let u: Unit = { ...this.me(), pos: base.pos, heading: base.heading, speed: base.speed };
+    const out: Hex[] = [];
+    for (let i = 0; i < UI.preview.driftTurns && u.speed > 0; i++) {
+      const m = resolveMotion(w, u, null);
+      if (m.path.length > 1) out.push(m.pos);
+      if (m.collision) break;
+      u = { ...u, pos: m.pos, heading: m.heading, speed: m.speed };
     }
     return out;
   }
@@ -274,27 +290,25 @@ export class Game {
     const act = this.isAct();
 
     // 左盤
-    const gs = this.ghosts();
-    const moves: MoveKeyView[] = gs.map((g) => {
-      const l = checkLegal(s, { type: 'ACCEL', choice: choiceFromKey(g.key) });
-      const glyph = g.key === 'CRUISE' ? '巡航' : g.key === 'BRAKE' ? '制動' : g.glyph;
-      return {
-        key: g.key, glyph, speed: speedText(g.vel), heat: l.heat,
-        enabled: l.ok, reason: l.reason, collision: g.collision !== null,
-      };
-    });
-    this.pads.updateMove(moves, declare);
+    const moves: MoveKeyView[] = [0, 1, 2, 3, 4, 5].map((rel) => ({
+      rel,
+      glyph: REL_GLYPH[rel],
+      name: REL_NAME[rel],
+      max: maxTaps(drive, rel as RelDir),
+      taps: this.sel && this.sel.rel === rel ? this.sel.taps : 0,
+    }));
+    this.pads.updateMove(moves, this.confirmView(declare), declare);
 
     // 右盤
     const cp = this.cockpit();
     this.pads.buildFunc(cp.pad);
-    const funcs: FuncKeyView[] = cp.pad.flat().map((k) => this.funcView(k));
-    this.pads.updateFunc(funcs, act);
+    this.pads.updateFunc(cp.pad.flat().map((k) => this.funcView(k)), act);
 
     this.hud.update({
       chassisName: c.name,
       driveName: drive.name + (c.drives.length > 1 ? `（${c.drives.map((d) => rules.drives[d].name).join('／')}）` : ''),
-      velSub: u.velSub,
+      heading: u.heading,
+      speed: u.speed,
       maxSpeed: drive.maxSpeed,
       facing: u.facing,
       heat: u.heat,
@@ -311,13 +325,27 @@ export class Game {
     $('btn-recenter').classList.toggle('hidden', this.pan.x === 0 && this.pan.y === 0);
   }
 
+  /** 中間確認鍵上寫這回合會變成什麼：「3速 → 轉60° −1 +2 → 4速↖」。 */
+  private confirmView(declare: boolean): ConfirmView {
+    if (!declare) return { label: '確認', sub: '行動階段' };
+    const m = this.predict();
+    const u = this.me();
+    if (!this.sel && u.speed === 0) return { label: '空過', sub: '靜止、不加速' };
+    const dir = m.speed > 0 ? DIR_GLYPH[m.heading] : '';
+    const parts = [`${u.speed}速`, KIND_TEXT[m.kind]];
+    if (m.loss > 0) parts.push(`−${m.loss}`);
+    if (this.sel) parts.push(m.kind === 'BRAKE' ? `−${this.sel.taps}` : `+${this.sel.taps}`);
+    else if (m.kind === 'COAST') parts.push(`−${driveOf(this.rules, u).decay}`);
+    return { label: '確認', sub: `${parts.join(' ')} → ${m.speed}速${dir}${m.collision ? '（撞）' : ''}` };
+  }
+
   private funcView(k: PadKey): FuncKeyView {
     const s = this.state;
     const u = this.me();
     const weapon = WEAPON_ACTION[k];
     if (weapon) {
       const a = this.rules.actions[weapon];
-      return { key: k, label: FUNC_LABEL[k], sub: costText(a.ap, a.heat), enabled: false, warn: false, reason: '第 5 步才接線（單一武器與命中公式）' };
+      return { key: k, label: FUNC_LABEL[k], sub: costText(a.ap, a.heat), enabled: false, warn: false, reason: '武器還沒接線' };
     }
     const cmd: Command = k === 'turnL' ? { type: 'TURN', delta: -1 }
       : k === 'turnR' ? { type: 'TURN', delta: 1 }
@@ -326,7 +354,10 @@ export class Game {
             : { type: 'WAIT' };
     const l = checkLegal(s, cmd);
     let sub = costText(l.ap, l.heat);
-    if (k === 'turnL' || k === 'turnR') sub = turnPrice(this.rules, u).ap === 0 ? '免費' : costText(l.ap, l.heat);
+    if (k === 'turnL' || k === 'turnR') {
+      const loss = driveOf(this.rules, u).facingTurnSpeedLoss;
+      sub = (turnPrice(this.rules, u).ap === 0 ? '免費' : costText(l.ap, l.heat)) + (loss > 0 ? ` −${loss}速` : '');
+    }
     if (k === 'wait') sub = '結束回合';
     if (k === 'switchDrive') {
       const list = this.rules.chassis[u.chassis].drives;
@@ -372,11 +403,12 @@ export class Game {
       this.refresh();
     });
 
-    // 桌機測試用的鍵盤：QWE / ASD = 六向、空白 = 巡航、X = 制動；← → 轉向、C 散熱、V 切換、Enter 待機
+    // 桌機測試用的鍵盤（跟著機首）：W 前、E 右前、D 右後、S 後、A 左後、Q 左前、空白 確認；
+    // ← → 轉向、C 散熱、V 切換、Enter 待機
     const keys: Record<string, () => void> = {
-      q: () => this.keyAccel('5'), w: () => this.keyAccel('0'), e: () => this.keyAccel('1'),
-      a: () => this.keyAccel('4'), s: () => this.keyAccel('3'), d: () => this.keyAccel('2'),
-      ' ': () => this.keyAccel('CRUISE'), x: () => this.keyAccel('BRAKE'),
+      w: () => this.keyTap(0), e: () => this.keyTap(1), d: () => this.keyTap(2),
+      s: () => this.keyTap(3), a: () => this.keyTap(4), q: () => this.keyTap(5),
+      ' ': () => (this.isDeclare() ? this.confirm() : this.hud.toast('行動階段：按 Enter（待機）結束這一回合', 'warn')),
       arrowleft: () => this.pressFunc('turnL'), arrowright: () => this.pressFunc('turnR'),
       c: () => this.pressFunc('cool'), v: () => this.pressFunc('switchDrive'), enter: () => this.pressFunc('wait'),
     };
@@ -390,12 +422,12 @@ export class Game {
     });
   }
 
-  private keyAccel(key: string): void {
+  private keyTap(rel: RelDir): void {
     if (!this.isDeclare()) {
       this.hud.toast('行動階段：按 Enter（待機）結束這一回合', 'warn');
       return;
     }
-    this.dispatch({ type: 'ACCEL', choice: choiceFromKey(key) });
+    this.tap(rel);
   }
 
   /** 點地圖：顯示那一格的地形與距離（同一把尺）。 */
@@ -404,20 +436,14 @@ export class Game {
     const a = worldToAxial(w.x, w.y);
     const hex = hexRound(a.q, a.r);
     const cell = cellAt(this.map, hex);
+    this.dirty = true;
     if (!cell) {
       this.picked = null;
-      this.dirty = true;
       return;
     }
     this.picked = hex;
     const t = this.rules.terrain[cell.terrain];
-    const dist = hexDist(subToHex(this.me().posSub), hex);
-    const bits = [t.name, `距離 ${dist}`, `高度 ${cell.elevation}`];
-    if (cell.dragModifier) bits.push(`阻力 +${cell.dragModifier}`);
-    if (!cell.passable) bits.push('不可進入');
-    if (cell.blocksLos) bits.push('擋視線');
-    this.hud.toast(bits.join(' · '));
-    this.dirty = true;
+    this.hud.toast(`${t.name} · 距離 ${hexDist(this.me().pos, hex)} · 高度 ${cell.elevation}（地形目前不影響移動）`);
   }
 
   // ---------------------------------------------------------------- 畫面
@@ -442,8 +468,8 @@ export class Game {
   }
 
   private focusPoint(now: number): Pt {
-    const u = this.me();
-    return subToWorld(this.motion.posOf(u.id, u.posSub, now));
+    const p = this.motion.posOf('player', this.me().pos, now);
+    return axialToWorld(p.q, p.r);
   }
 
   private clampPan(): void {
@@ -456,8 +482,7 @@ export class Game {
 
   private loop = (now: number): void => {
     const animating = this.motion.active(now);
-    // 動畫剛結束的那一幀一定要再畫一次：速度箭頭、幽靈標記、巡航預測都只在靜止時畫。
-    // （用「上一幀還在動」判斷，而不是猜下一幀的時間 —— 幀間隔不固定。）
+    // 動畫剛結束的那一幀一定要再畫一次：速度箭頭、預測、滑行都只在靜止時畫
     if (this.wasAnimating && !animating) this.dirty = true;
     this.wasAnimating = animating;
     if (this.dirty || animating) {
@@ -466,13 +491,30 @@ export class Game {
       const size = hexSizeFor(this.viewW, UI.camera.hexesAcross, UI.camera.minHexPx, UI.camera.maxHexPx);
       this.cam = computeCamera(this.bounds, this.viewW, this.viewH, size, this.focusPoint(now), this.pan, this.safe);
       const declare = this.isDeclare();
-      const ghosts = declare && UI.preview.showAllGhosts ? this.ghosts() : [];
-      const focus = declare && this.previewKey ? this.ghosts().find((g) => g.key === this.previewKey) ?? null : null;
       const u = this.me();
-      const drift = this.drift(focus ? { pos: focus.pos, vel: focus.vel } : { pos: u.posSub, vel: u.velSub });
+      let preview: Preview | null = null;
+      let hint: RelHint | null = null;
+      let drift: Hex[];
+      if (declare) {
+        const m = this.predict();
+        preview = {
+          path: m.path, pos: m.pos, heading: m.heading, speed: m.speed,
+          collision: m.collision?.at ?? null, selected: this.sel !== null,
+        };
+        const drive = driveOf(this.rules, u);
+        hint = {
+          facing: u.facing,
+          taps: [0, 1, 2, 3, 4, 5].map((r) => maxTaps(drive, r as RelDir)),
+          sel: this.sel,
+        };
+        drift = this.drift(m);
+      } else {
+        // 行動階段：從目前位置開始，看下回合不加速會滑到哪
+        drift = this.drift({ pos: u.pos, heading: u.heading, speed: u.speed } as MotionResult);
+      }
       draw(this.ctx, {
         state: this.state, cam: this.cam, viewW: this.viewW, viewH: this.viewH, now,
-        motion: this.motion, ghosts, focus, drift, trail: this.trail, picked: this.picked,
+        motion: this.motion, preview, hint, drift, trail: this.trail, picked: this.picked,
       });
     }
     requestAnimationFrame(this.loop);

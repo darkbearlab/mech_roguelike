@@ -1,5 +1,5 @@
 /**
- * 回合引擎（§5）與指令 —— 規則層唯一的入口。
+ * 回合引擎與指令 —— 規則層唯一的入口。
  *
  *   checkLegal(state, cmd)   能不能做、要花多少（介面拿它畫按鍵）
  *   applyCommand(state, cmd) 做下去，回傳新狀態與事件（不改動傳入的狀態）
@@ -8,16 +8,22 @@
  *
  * 一回合 = 解算順序模組（order.ts）排出的步驟表。引擎只負責一步一步走：
  * 需要輸入的步驟（DECLARE、ACT）停下來等指令；自動步驟（MOVE、WORLD、停機中的單位）直接走完。
+ *
+ * 行動階段（右盤）什麼時候結束：
+ *   - 主動按待機
+ *   - AP 用完（歸零）
+ *   - 透支：行動照常結算，然後結束，不夠的部分從下一個階段的配額扣
+ *   - 過熱停機
  */
 import type { Dir, Hex } from './hex';
-import { hexToSub, rotate, vec } from './hex';
+import { rotate } from './hex';
 import type { GameMap } from './map';
 import { addHeat, checkAp, passiveCool, payQuota, spendAp } from './economy';
-import { accelLegality, resolveMotion, worldOf } from './movement';
+import { accelHeat, accelLegality, driveOf, resolveMotion, worldOf } from './movement';
 import { ORDERS } from './order';
 import { createRng } from './rng';
 import type { Rules } from './rules';
-import type { AccelChoice, Command, GameEvent, GameState, Side, Step, Unit } from './state';
+import type { AccelOrder, Command, GameEvent, GameState, Side, Step, Unit } from './state';
 import { activeUnit, currentStep, unitById } from './state';
 
 // ---------------------------------------------------------------- 開局
@@ -47,8 +53,9 @@ export function makeUnit(rules: Rules, id: string, side: Side, spec: UnitSetup, 
     side,
     chassis: c.id,
     drive: c.drives[0],
-    posSub: hexToSub(hex),
-    velSub: vec(0, 0),
+    pos: { q: hex.q, r: hex.r },
+    heading: facing,
+    speed: 0,
     facing,
     ap: 0,
     debt: 0,
@@ -66,7 +73,7 @@ export function newGame(rules: Rules, map: GameMap, setup: Setup): GameState {
   if (!ORDERS[order]) throw new Error('沒有這個解算順序：' + order);
   const p = setup.player;
   const units: Unit[] = [
-    // §5：玩家永遠先手 —— 步驟表照 units 的順序排，所以玩家必須在第一個。
+    // 玩家永遠先手 —— 步驟表照 units 的順序排，所以玩家必須在第一個。
     makeUnit(rules, 'player', 'PLAYER', p, p.hex ?? map.playerSpawn.hex, p.facing ?? map.playerSpawn.facing),
   ];
   (setup.enemies ?? []).forEach((e, i) => {
@@ -95,10 +102,10 @@ export function newGame(rules: Rules, map: GameMap, setup: Setup): GameState {
 export interface Legal {
   ok: boolean;
   reason?: string;
-  /** 這個指令的 AP 成本與產熱（加速宣告的熱是加速本身產生的）。 */
+  /** 這個指令的 AP 成本與產熱（加速宣告的熱是點數產生的）。 */
   ap: number;
   heat: number;
-  /** 會新增的債務。> 0 時介面用警示色（§9）。 */
+  /** 會新增的債務。> 0 時介面用警示色，而且做完這一下階段就結束。 */
   overdraft: number;
 }
 
@@ -106,7 +113,7 @@ function no(reason: string): Legal {
   return { ok: false, reason, ap: 0, heat: 0, overdraft: 0 };
 }
 
-/** 下一面要付多少（§3.2 轉向規則）：免費額度內 0，超過的照 actions.turn 收。 */
+/** 下一面要付多少（轉向規則）：免費額度內 0，超過的照 actions.turn 收。 */
 export function turnPrice(rules: Rules, u: Unit): { ap: number; heat: number } {
   const free = rules.drives[u.drive].turnRule.freeFacesPerTurn;
   if (free === 'ANY' || u.facesTurned < free) return { ap: 0, heat: 0 };
@@ -122,14 +129,13 @@ export function checkLegal(s: GameState, cmd: Command): Legal {
 
   if (cmd.type === 'ACCEL') {
     if (step.kind !== 'DECLARE') return no('這回合已經宣告過加速');
-    const l = accelLegality(rules, u, cmd.choice);
+    const l = accelLegality(rules, u, cmd.order);
     if (!l.ok) return no(l.reason!);
-    const heat = resolveMotion(worldOf(s, u.id), u, cmd.choice).heat;
-    return { ok: true, ap: 0, heat, overdraft: 0 };
+    return { ok: true, ap: 0, heat: accelHeat(driveOf(rules, u), cmd.order), overdraft: 0 };
   }
 
-  // 其餘都是行動：§5 的順序是 加速宣告 → 位移解算 → 行動。
-  if (step.kind !== 'ACT') return no('先宣告加速：行動在位移之後');
+  // 其餘都是行動：順序是 左盤加速 → 位移 → 右盤行動。
+  if (step.kind !== 'ACT') return no('先在左盤確認加速：行動在位移之後');
 
   const priced = (ap: number, heat: number): Legal => {
     const c = checkAp(rules, u, ap);
@@ -161,7 +167,8 @@ export function checkLegal(s: GameState, cmd: Command): Legal {
 // ---------------------------------------------------------------- 指令
 
 export function applyCommand(s: GameState, cmd: Command): { state: GameState; events: GameEvent[] } {
-  if (!checkLegal(s, cmd).ok) return { state: s, events: [] };
+  const legal = checkLegal(s, cmd);
+  if (!legal.ok) return { state: s, events: [] };
   const n = cloneState(s);
   const ev: GameEvent[] = [];
   const u = activeUnit(n)!;
@@ -169,7 +176,7 @@ export function applyCommand(s: GameState, cmd: Command): { state: GameState; ev
 
   switch (cmd.type) {
     case 'ACCEL':
-      u.pendingAccel = cmd.choice;
+      u.pendingAccel = cmd.order;
       proceed(n, ev);
       break;
     case 'TURN': {
@@ -178,9 +185,11 @@ export function applyCommand(s: GameState, cmd: Command): { state: GameState; ev
       const from = u.facing;
       u.facing = rotate(from, cmd.delta);
       u.facesTurned++;
-      ev.push({ type: 'TURNED', unitId: u.id, from, to: u.facing });
+      // 依機體類型，轉動機身也會吃掉速度
+      u.speed = Math.max(0, u.speed - driveOf(rules, u).facingTurnSpeedLoss);
+      ev.push({ type: 'TURNED', unitId: u.id, from, to: u.facing, speed: u.speed });
       heat(n, u, p.heat, ev);
-      afterAction(n, u, ev);
+      afterAction(n, u, legal, ev);
       break;
     }
     case 'COOL': {
@@ -188,7 +197,7 @@ export function applyCommand(s: GameState, cmd: Command): { state: GameState; ev
       spendAp(u, a.ap);
       heat(n, u, a.heat, ev);
       ev.push({ type: 'COOLED', unitId: u.id, heat: u.heat });
-      afterAction(n, u, ev);
+      afterAction(n, u, legal, ev);
       break;
     }
     case 'SWITCH_DRIVE': {
@@ -196,14 +205,16 @@ export function applyCommand(s: GameState, cmd: Command): { state: GameState; ev
       const list = rules.chassis[u.chassis].drives;
       spendAp(u, a.ap);
       u.drive = list[(list.indexOf(u.drive) + 1) % list.length];
+      // 新驅動的極速比現在的速度低時，當場夾住
+      u.speed = Math.min(u.speed, driveOf(rules, u).maxSpeed);
       ev.push({ type: 'DRIVE', unitId: u.id, drive: u.drive });
       heat(n, u, a.heat, ev);
-      afterAction(n, u, ev);
+      afterAction(n, u, legal, ev);
       break;
     }
     case 'WAIT':
       ev.push({ type: 'WAITED', unitId: u.id });
-      endPhase(u, ev);
+      endPhase(u, 'WAIT', ev);
       proceed(n, ev);
       break;
   }
@@ -241,17 +252,18 @@ function arrive(s: GameState, step: Step, ev: GameEvent[]): boolean {
       const u = unitById(s, step.unitId)!;
       if (!u.alive) return true;
       beginPhase(s, u, ev);
-      // §4.2：停機中不能加速，但阻力照常作用 —— 所以不是跳過位移，而是強制巡航。
+      // 停機中不能加速，但慣性照常 —— 所以不是跳過位移，而是強制「不加速」（照樣衰減）。
       if (u.shutdown > 0) {
-        u.pendingAccel = { kind: 'CRUISE' };
+        u.pendingAccel = null;
         return true;
       }
       return false;
     }
     case 'MOVE':
+      // 步驟表保證 DECLARE 在 MOVE 之前；pendingAccel 為 null 就是「沒點、直接確認」
       for (const id of step.unitIds) {
         const u = unitById(s, id)!;
-        if (u.alive && u.pendingAccel) move(s, u, u.pendingAccel, ev);
+        if (u.alive) move(s, u, u.pendingAccel, ev);
         u.pendingAccel = null;
       }
       return true;
@@ -259,7 +271,12 @@ function arrive(s: GameState, step: Step, ev: GameEvent[]): boolean {
       const u = unitById(s, step.unitId)!;
       if (!u.alive) return true;
       if (u.shutdown > 0) {
-        endPhase(u, ev);
+        endPhase(u, 'SHUTDOWN', ev);
+        return true;
+      }
+      // 配額被債務吃光：AP 一開始就是 0，這個階段沒有事可做
+      if (u.ap <= 0) {
+        endPhase(u, 'AP_SPENT', ev);
         return true;
       }
       return false;
@@ -276,27 +293,31 @@ function beginPhase(s: GameState, u: Unit, ev: GameEvent[]): void {
   ev.push({ type: 'PHASE', unitId: u.id });
 }
 
+type EndReason = 'WAIT' | 'AP_SPENT' | 'OVERDRAFT' | 'SHUTDOWN';
+
 /** 階段結束：沒用完的 AP 作廢（配額不累積）；停機中的階段算一次服刑。 */
-function endPhase(u: Unit, ev: GameEvent[]): void {
+function endPhase(u: Unit, reason: EndReason, ev: GameEvent[]): void {
   u.ap = 0;
+  ev.push({ type: 'PHASE_END', unitId: u.id, reason });
   if (u.shutdown > 0) {
     u.shutdown--;
     if (u.shutdown === 0) ev.push({ type: 'REBOOT', unitId: u.id });
   }
 }
 
-function move(s: GameState, u: Unit, choice: AccelChoice, ev: GameEvent[]): void {
-  const r = resolveMotion(worldOf(s, u.id), u, choice);
-  const from = u.posSub;
-  u.posSub = r.posSub;
-  u.velSub = r.velSub;
-  ev.push({ type: 'MOVED', unitId: u.id, choice, from, to: r.posSub, velSub: r.velSub, path: r.path });
+function move(s: GameState, u: Unit, order: AccelOrder, ev: GameEvent[]): void {
+  const r = resolveMotion(worldOf(s, u.id), u, order);
+  const from = u.pos;
+  u.pos = r.pos;
+  u.heading = r.heading;
+  u.speed = r.speed;
+  ev.push({ type: 'MOVED', unitId: u.id, order, from, to: r.pos, heading: r.heading, speed: r.speed, path: r.path });
   if (r.collision) ev.push({ type: 'COLLIDED', unitId: u.id, collision: r.collision });
   heat(s, u, r.heat, ev);
 }
 
 /**
- * 加熱並處理過熱（§4.2）。
+ * 加熱並處理過熱。
  *
  * 在自己的階段中過熱：這個階段剩下的部分當場作廢，再加上接下來 N 個完整階段 ——
  * 所以停機數要多算一個「現在這個」。
@@ -313,15 +334,19 @@ function inOwnPhase(s: GameState, u: Unit): boolean {
   return step.kind === 'MOVE' ? step.unitIds.includes(u.id) : step.unitId === u.id;
 }
 
-/** 行動做完之後：若這一下讓機體過熱，階段立刻結束。 */
-function afterAction(s: GameState, u: Unit, ev: GameEvent[]): void {
-  if (u.shutdown === 0) return;
-  endPhase(u, ev);
+/** 行動做完之後：過熱、透支、AP 用完，三者任一成立就結束這個階段。 */
+function afterAction(s: GameState, u: Unit, legal: Legal, ev: GameEvent[]): void {
+  let reason: EndReason | null = null;
+  if (u.shutdown > 0) reason = 'SHUTDOWN';
+  else if (legal.overdraft > 0) reason = 'OVERDRAFT';
+  else if (legal.ap > 0 && u.ap <= 0) reason = 'AP_SPENT';
+  if (!reason) return;
+  endPhase(u, reason, ev);
   proceed(s, ev);
 }
 
 /**
- * 世界階段（§5）：被動散熱、狀態計時、勝敗判定。
+ * 世界階段：被動散熱、狀態計時、勝敗判定。
  * 停機的計時跟著「自己的階段」走（endPhase），不在這裡 —— 停機是少掉一個階段，不是少掉一段時間。
  */
 function world(s: GameState): void {
@@ -331,7 +356,7 @@ function world(s: GameState): void {
 
 /**
  * 勝敗判定。玩家陣亡 → 敵方勝；開局有敵人且全滅 → 玩家勝。
- * 開局就沒有敵人（第 2 步的手感測試）是自由移動，永遠不結束。
+ * 開局就沒有敵人（手感測試）是自由移動，永遠不結束。
  */
 export function judge(s: GameState): GameState['over'] {
   if (!s.units.some((u) => u.side === 'PLAYER' && u.alive)) return { winner: 'ENEMY' };

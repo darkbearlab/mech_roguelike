@@ -1,11 +1,10 @@
 {
-  "_comment": "呈現層與介面的旋鈕（§9）。**刻意不放在 core/ 讀的檔案裡** —— 規則層對「動畫要幾毫秒」沒有意見，把任何一個值設為 0，最終狀態必須完全相同。",
+  "_comment": "呈現層與介面的旋鈕。**刻意不放在 core/ 讀的檔案裡** —— 規則層對「動畫要幾毫秒」沒有意見，把任何一個值設為 0，最終狀態必須完全相同。",
 
   "animation": {
-    "_msPerHex": "位移動畫每一格花多少毫秒。動畫走的是 §3.1 第 6 步的那條六角直線。",
-    "msPerHex": 110,
-    "minMoveMs": 160,
-    "maxMoveMs": 650,
+    "_msPerHex": "位移動畫每走一格花多少毫秒。等速：看得出這回合走了幾格。",
+    "msPerHex": 130,
+    "maxMoveMs": 800,
     "turnMs": 120
   },
 
@@ -14,29 +13,27 @@
     "hexesAcross": 11,
     "minHexPx": 16,
     "maxHexPx": 40,
-    "_recenterAfterMove": "移動後自動回中（§9）：拖曳平移只是暫時的，下一次加速宣告就會把鏡頭拉回機體身上。",
+    "_recenterAfterMove": "移動後自動回中：拖曳平移只是暫時的，下一次確認加速就會把鏡頭拉回機體身上。",
     "recenterAfterMove": true,
-    "_followActingUnit": "敵人行動時鏡頭要不要跟（OFF / SNAP / PAN）。沿用 PMC 的結論預設 OFF。第 6 步有敵人之後才接線。",
+    "_followActingUnit": "敵人行動時鏡頭要不要跟（OFF / SNAP / PAN）。沿用 PMC 的結論預設 OFF。有敵人之後才接線。",
     "followActingUnit": "OFF"
   },
 
   "preview": {
-    "_showAllGhosts": "加速宣告時，把八個選項的預測落點全部畫在地圖上（§9：幽靈標記）。按住某一鍵時只強調那一個並畫出整條路徑。",
-    "showAllGhosts": true,
-    "_driftTurns": "巡航預測：照目前速度再滑幾回合，畫成一串虛點。慣性要看得見才讀得懂。",
+    "_driftTurns": "滑行預測：從這回合的落點起，之後都不加速再滑幾回合，畫成一串虛點。慣性要看得見才讀得懂。",
     "driftTurns": 3,
     "_trailLength": "機體走過的軌跡保留幾個點。",
     "trailLength": 16
   },
 
-  "_movePad": "左盤（§9）：3×2 六向 + 巡航 + 制動。數字是方向編號 0..5，同一個代號佔兩格就是跨欄。巡航是最常按的一鍵，所以給它最大的面積。",
+  "_movePad": "左盤（設計者 2026-09-11）：**跟著機首排** —— 上面那顆永遠是「前」。數字是相對機首的方向（0 前、1 右前、2 右後、3 後、4 左後、5 左前），OK 是中間的確認鍵（roguelike 的「空過」鍵），\"\" 是空格。同一列相鄰的相同代號合併成一顆跨欄的鍵 —— 確認鍵佔滿中間那一列，才寫得下「這回合會變成幾速、往哪」。",
   "movePad": [
     ["5", "0", "1"],
-    ["4", "3", "2"],
-    ["CRUISE", "CRUISE", "BRAKE"]
+    ["OK", "OK", "OK"],
+    ["4", "3", "2"]
   ],
 
-  "_cockpits": "右盤＝座艙（§9）。每個機型在 chassis.json 指定一個座艙 id。pad 是 3×3 佈局；readouts 是資訊層 —— 機型差異應該落在「能知道什麼」而不是「按鈕在哪」，v0.1 先全開。",
+  "_cockpits": "右盤＝座艙。每個機型在 chassis.json 指定一個座艙 id。pad 是 3×3 佈局；readouts 是資訊層 —— 機型差異應該落在「能知道什麼」而不是「按鈕在哪」，先全開。",
   "cockpits": {
     "std": {
       "name": "標準座艙",
@@ -45,7 +42,7 @@
         ["fire", "reload", "swap"],
         ["cool", "switchDrive", "wait"]
       ],
-      "_readouts": "heat: NUMERIC（數值）| LIGHT（只有警告燈）。speed: NUMERIC | BANDS（慢/中/快）。range: EXACT | BANDS（近/中/遠，第 3 步）。rearCamera：後方視野（第 3 步）。",
+      "_readouts": "heat: NUMERIC（數值）| LIGHT（只有警告燈）。speed: NUMERIC | BANDS（慢/中/快）。range: EXACT | BANDS（之後的視線）。rearCamera：後方視野（之後）。",
       "readouts": {
         "heat": "NUMERIC",
         "speed": "NUMERIC",

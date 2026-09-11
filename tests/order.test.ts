@@ -3,7 +3,7 @@ import { ORDERS, SEQUENTIAL } from '../src/core/order';
 import { createRng, nextFloat, nextInt } from '../src/core/rng';
 import { game } from './helpers';
 
-describe('§5 解算順序模組', () => {
+describe('解算順序模組', () => {
   it('循序制：每個單位 宣告 → 位移 → 行動，最後是世界階段；陣亡的不排', () => {
     const s = game('wk1', { enemies: [{ chassis: 'tk1', hex: { q: 3, r: 3 }, facing: 3 }] });
     const units = s.units.map((u, i) => (i === 1 ? { ...u, alive: false } : u));
@@ -17,7 +17,7 @@ describe('§5 解算順序模組', () => {
   });
 });
 
-describe('§1 可播種亂數', () => {
+describe('可播種亂數', () => {
   it('同一個種子 → 同一串；不同種子 → 不同串', () => {
     const a = createRng(42);
     const b = createRng(42);

@@ -1,27 +1,34 @@
 /**
- * 兩個觸控盤（§9）。
+ * 兩個觸控盤。
  *
- * 左盤 = 移動：3×2 六向 + 巡航 + 制動。**按住**時地圖上強調那一個選項的整條路徑，
- * 在按鍵上放開才送出；手指滑出按鍵再放開 = 取消。承諾制的遊戲，送出前要看得到後果。
+ * 左盤 = 加速（設計者 2026-09-11）：**跟著機首排**，上面那顆永遠是「前」。
+ * 往某個方向點幾下就是這回合在那個方向加速幾；中間是確認鍵（roguelike 的「空過」鍵），
+ * 什麼都不點直接確認 = 這回合不加速。點另一個方向 = 改選；同一個方向點超過上限 = 歸零。
+ * 選擇的狀態由 Game 持有，這裡只負責畫與回報點了哪顆。
  *
  * 右盤 = 功能盤，也就是座艙：佈局由機型的座艙定義（ui.json 的 cockpits），
  * 每一鍵顯示 AP 成本與產熱，會造成透支的以警示色標示。
  *
  * 不能按的鍵不用 `disabled` —— 那樣點下去什麼都不會發生。改用 aria-disabled，
- * 點了之後把理由告訴玩家（例如「側向加速：步行只能往前方三面推進」）。
+ * 點了之後把理由告訴玩家（例如「噴射往左後方推不動」）。
  */
 import type { PadKey } from './config';
 import { h } from './dom';
 
 export interface MoveKeyView {
-  key: string;
+  /** 相對機首的方向 0..5。 */
+  rel: number;
   glyph: string;
-  /** 按下去之後的速度（格/回合）。 */
-  speed: string;
-  heat: number;
-  enabled: boolean;
-  reason?: string;
-  collision: boolean;
+  name: string;
+  /** 這個方向最多能點幾下。0 = 推不動。 */
+  max: number;
+  /** 目前點了幾下（沒選這個方向就是 0）。 */
+  taps: number;
+}
+
+export interface ConfirmView {
+  label: string;
+  sub: string;
 }
 
 export interface FuncKeyView {
@@ -29,26 +36,22 @@ export interface FuncKeyView {
   label: string;
   sub: string;
   enabled: boolean;
-  /** 會造成透支（§9 警示色）。 */
+  /** 會造成透支（警示色）。 */
   warn: boolean;
   reason?: string;
 }
 
-const MOVE_NAME: Record<string, string> = {
-  0: '北', 1: '東北', 2: '東南', 3: '南', 4: '西南', 5: '西北', CRUISE: '巡航', BRAKE: '制動',
-};
-
 export interface PadHandlers {
-  preview(key: string | null): void;
-  accel(key: string): void;
+  tap(rel: number): void;
+  confirm(): void;
   action(key: PadKey): void;
   refused(reason: string): void;
 }
 
 export class Pads {
-  private moveButtons = new Map<string, HTMLButtonElement>();
+  private moveButtons = new Map<number, HTMLButtonElement>();
+  private confirmButton: HTMLButtonElement | null = null;
   private funcButtons = new Map<PadKey, HTMLButtonElement>();
-  private moveViews = new Map<string, MoveKeyView>();
   private funcViews = new Map<PadKey, FuncKeyView>();
   private moveActive = false;
   private funcActive = false;
@@ -60,25 +63,45 @@ export class Pads {
     private on: PadHandlers,
   ) {}
 
-  /** 左盤佈局。同一列相鄰的相同代號合併成跨欄的一顆鍵。 */
+  /** 左盤佈局：方向編號字串、'OK'、''（空格）。同一列相鄰的相同代號合併成跨欄的一顆鍵。 */
   buildMove(layout: string[][]): void {
-    this.moveRoot.replaceChildren(h('div', 'pad-title', '① 加速'));
+    this.moveRoot.replaceChildren(h('div', 'pad-title', '① 加速（跟著機首）'));
     const grid = h('div', 'pad-grid');
+    const cells: { key: string; span: number }[] = [];
     for (const row of layout) {
       for (let i = 0; i < row.length; i++) {
-        const key = row[i];
-        if (i > 0 && row[i - 1] === key) continue;
+        if (i > 0 && row[i] !== '' && row[i - 1] === row[i]) continue;
         let span = 1;
-        while (row[i + span] === key) span++;
-        const b = h('button', 'key move-key');
-        b.type = 'button';
-        b.dataset.key = key;
-        if (span > 1) b.style.gridColumn = `span ${span}`;
-        b.append(h('b', 'key-main'), h('small', 'key-sub'));
-        this.bindMove(b, key);
-        this.moveButtons.set(key, b);
-        grid.append(b);
+        while (row[i] !== '' && row[i + span] === row[i]) span++;
+        cells.push({ key: row[i], span });
       }
+    }
+    for (const { key, span } of cells) {
+      if (key === '') {
+        grid.append(h('span', 'pad-blank'));
+        continue;
+      }
+      const b = h('button', key === 'OK' ? 'key confirm-key' : 'key move-key');
+      b.type = 'button';
+      b.dataset.key = key;
+      if (span > 1) b.style.gridColumn = `span ${span}`;
+      b.append(h('b', 'key-main'), h('small', 'key-sub'));
+      b.addEventListener('contextmenu', (e) => e.preventDefault());
+      if (key === 'OK') {
+        b.addEventListener('click', () => {
+          if (!this.moveActive) return this.on.refused('行動階段：在右盤行動，或按「待機」結束這一回合');
+          this.on.confirm();
+        });
+        this.confirmButton = b;
+      } else {
+        const rel = Number(key);
+        b.addEventListener('click', () => {
+          if (!this.moveActive) return this.on.refused('行動階段：在右盤行動，或按「待機」結束這一回合');
+          this.on.tap(rel);
+        });
+        this.moveButtons.set(rel, b);
+      }
+      grid.append(b);
     }
     this.moveRoot.append(grid);
   }
@@ -103,20 +126,24 @@ export class Pads {
     this.funcRoot.append(grid);
   }
 
-  updateMove(views: MoveKeyView[], active: boolean): void {
+  updateMove(views: MoveKeyView[], confirm: ConfirmView, active: boolean): void {
     this.moveActive = active;
     this.moveRoot.classList.toggle('pad-active', active);
     for (const v of views) {
-      this.moveViews.set(v.key, v);
-      const b = this.moveButtons.get(v.key);
+      const b = this.moveButtons.get(v.rel);
       if (!b) continue;
-      const on = active && v.enabled;
-      b.setAttribute('aria-disabled', String(!on));
-      b.classList.toggle('key-collide', on && v.collision);
-      const sub = !active || !v.enabled ? '' : v.speed + (v.heat > 0 ? ' · +' + v.heat : '');
+      b.setAttribute('aria-disabled', String(!active || v.max === 0));
+      b.classList.toggle('key-selected', v.taps > 0);
       (b.children[0] as HTMLElement).textContent = v.glyph;
-      (b.children[1] as HTMLElement).textContent = sub;
-      b.setAttribute('aria-label', `${MOVE_NAME[v.key] ?? v.key}${sub ? '：速度 ' + sub : ''}`);
+      // 點數：實心 = 已點、空心 = 還能點；推不動就是一條線
+      (b.children[1] as HTMLElement).textContent = v.max === 0 ? '—' : '●'.repeat(v.taps) + '○'.repeat(v.max - v.taps);
+      b.setAttribute('aria-label', `${v.name}：${v.max === 0 ? '推不動' : `已點 ${v.taps}／最多 ${v.max}`}`);
+    }
+    if (this.confirmButton) {
+      this.confirmButton.setAttribute('aria-disabled', String(!active));
+      (this.confirmButton.children[0] as HTMLElement).textContent = confirm.label;
+      (this.confirmButton.children[1] as HTMLElement).textContent = confirm.sub;
+      this.confirmButton.setAttribute('aria-label', `${confirm.label}：${confirm.sub}`);
     }
   }
 
@@ -136,52 +163,9 @@ export class Pads {
     }
   }
 
-  private bindMove(b: HTMLButtonElement, key: string): void {
-    let pressing = false;
-    const inside = (e: PointerEvent): boolean => {
-      const r = b.getBoundingClientRect();
-      return e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom;
-    };
-    b.addEventListener('pointerdown', (e) => {
-      if (!this.moveActive) {
-        this.on.refused('行動階段：在右盤行動，或按「待機」結束這一回合');
-        return;
-      }
-      const v = this.moveViews.get(key);
-      if (!v?.enabled) {
-        if (v?.reason) this.on.refused(v.reason);
-        return;
-      }
-      pressing = true;
-      b.setPointerCapture(e.pointerId);
-      b.classList.add('key-down');
-      this.on.preview(key);
-    });
-    b.addEventListener('pointermove', (e) => {
-      if (!pressing) return;
-      const inn = inside(e);
-      b.classList.toggle('key-down', inn);
-      this.on.preview(inn ? key : null);
-    });
-    b.addEventListener('pointerup', (e) => {
-      if (!pressing) return;
-      pressing = false;
-      b.classList.remove('key-down');
-      this.on.preview(null);
-      if (inside(e)) this.on.accel(key);
-    });
-    b.addEventListener('pointercancel', () => {
-      pressing = false;
-      b.classList.remove('key-down');
-      this.on.preview(null);
-    });
-    // 觸控長按不要跳出系統選單
-    b.addEventListener('contextmenu', (e) => e.preventDefault());
-  }
-
   private pressFunc(key: PadKey): void {
     if (!this.funcActive) {
-      this.on.refused('先在左盤宣告加速：行動在位移之後（§5）');
+      this.on.refused('先在左盤確認加速：行動在位移之後');
       return;
     }
     const v = this.funcViews.get(key);

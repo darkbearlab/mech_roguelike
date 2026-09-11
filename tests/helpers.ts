@@ -6,7 +6,7 @@ import { loadMap } from '../src/core/map';
 import type { GameMap, RawMap } from '../src/core/map';
 import { RULES } from '../src/core/rules';
 import type { Rules } from '../src/core/rules';
-import type { AccelChoice, Command, GameEvent, GameState, Unit } from '../src/core/state';
+import type { Command, GameEvent, GameState, RelDir, Unit } from '../src/core/state';
 
 /**
  * 一張全開闊的小地圖。`paint` 用位移座標把某些格子換成別的地形字元。
@@ -64,14 +64,26 @@ export function run(s: GameState, cmds: Command[]): { state: GameState; events: 
   return { state: cur, events };
 }
 
-export const push = (dir: Dir): Command => ({ type: 'ACCEL', choice: { kind: 'DIR', dir } });
-export const CRUISE: Command = { type: 'ACCEL', choice: { kind: 'CRUISE' } };
-export const BRAKE: Command = { type: 'ACCEL', choice: { kind: 'BRAKE' } };
+/** 左盤：往相對機首 rel 的方向點 taps 下，然後確認。 */
+export const accel = (rel: RelDir, taps: number): Command => ({ type: 'ACCEL', order: { rel, taps } });
+/** 左盤：什麼都不點，直接確認。 */
+export const COAST: Command = { type: 'ACCEL', order: null };
 export const WAIT: Command = { type: 'WAIT' };
+export const TURN_R: Command = { type: 'TURN', delta: 1 };
+export const TURN_L: Command = { type: 'TURN', delta: -1 };
 
-/** 一整個玩家回合：宣告加速然後待機（沒有敵人時就是一回合）。 */
-export function turn(choice: Command): Command[] {
-  return [choice, WAIT];
+/** 直接改複製品上的欄位（模擬第 5 步以後才會有的傷害、外部加熱等）。 */
+export function patch(s: GameState, f: (s: GameState) => void): GameState {
+  const n = structuredClone({ ...s, rules: null, map: null }) as unknown as GameState;
+  n.rules = s.rules;
+  n.map = s.map;
+  f(n);
+  return n;
 }
 
-export const DIR_CHOICE = (dir: Dir): AccelChoice => ({ kind: 'DIR', dir });
+/** 把一份 Rules 複製出來改（改 actions 之類 withPatch 不開放的欄位）。 */
+export function customRules(f: (r: Rules) => void): Rules {
+  const r = structuredClone(RULES);
+  f(r);
+  return r;
+}

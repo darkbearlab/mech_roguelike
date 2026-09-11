@@ -8,8 +8,8 @@ function unit(patch: Partial<Unit> = {}): Unit {
   return { ...player(game('wk1')), ap: 0, debt: 0, heat: 0, ...patch };
 }
 
-describe('§4.1 行動點', () => {
-  it('配額先扣抵債務', () => {
+describe('行動點', () => {
+  it('配額先扣抵債務，扣不完的繼續帶著', () => {
     const u = unit({ debt: 2 });
     payQuota(u, 1);
     expect([u.debt, u.ap]).toEqual([1, 0]);
@@ -22,18 +22,19 @@ describe('§4.1 行動點', () => {
     expect([big.debt, big.ap]).toEqual([0, 2]);
   });
 
-  it('透支：差額成為債務，上限 apDebtCap', () => {
+  it('透支：手上有 AP 就能做比它貴的事，差額成為債務，上限 apDebtCap', () => {
     expect(checkAp(RULES, unit({ ap: 1 }), 1)).toEqual({ ok: true, overdraft: 0 });
     expect(checkAp(RULES, unit({ ap: 1 }), 3)).toEqual({ ok: true, overdraft: 2 });
-    const over = checkAp(RULES, unit({ ap: 0 }), 3);
+    const over = checkAp(RULES, unit({ ap: 1 }), 4);
     expect(over.ok).toBe(false);
     expect(over.overdraft).toBe(3);
     expect(over.reason).toContain('上限 2');
   });
 
-  it('還清前不能做要花 AP 的行動，但免費的事照做', () => {
-    expect(checkAp(RULES, unit({ debt: 1, ap: 5 }), 1).ok).toBe(false);
-    expect(checkAp(RULES, unit({ debt: 1 }), 0)).toEqual({ ok: true, overdraft: 0 });
+  it('手上沒有 AP 就不能做要花 AP 的事；免費的事照做；背著債不影響（債已經從配額扣過了）', () => {
+    expect(checkAp(RULES, unit({ ap: 0 }), 1).reason).toContain('用完');
+    expect(checkAp(RULES, unit({ ap: 0 }), 0)).toEqual({ ok: true, overdraft: 0 });
+    expect(checkAp(RULES, unit({ ap: 1, debt: 1 }), 1).ok).toBe(true);
   });
 
   it('付 AP 先用手上的，不夠的記債', () => {
@@ -46,7 +47,7 @@ describe('§4.1 行動點', () => {
   });
 });
 
-describe('§4.2 熱量', () => {
+describe('熱量', () => {
   it('夾在 [0, heatCap]', () => {
     const u = unit({ heat: 10 });
     addHeat(RULES, u, -25);

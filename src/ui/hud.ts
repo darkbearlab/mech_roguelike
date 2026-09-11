@@ -1,20 +1,23 @@
 /**
- * 儀表（§9）：速度（含方向）、朝向、熱量條、AP 與債務、彈藥。
+ * 儀表：速度（含方向）、機首、熱量條、AP 與債務、彈藥。
  *
- * 左上角的姿態儀同時畫朝向（機首）與速度向量（箭頭）——
- * 兩者分離是本作動態感的核心（§3.3），所以要放在同一個小圓裡一眼看得出夾角。
- * 顯示精度由座艙的資訊層決定（Readouts），v0.1 全開。
+ * 左上角的姿態儀同時畫機首（青色三角）與速度（琥珀色箭頭，長度 ∝ 速度 / 極速）——
+ * 兩者分離是這個遊戲動態感的核心，要放在同一個小圓裡一眼看得出夾角。
+ * 顯示精度由座艙的資訊層決定（Readouts），先全開。
+ *
+ * （之後要改成左右兩側可拖出的儀表板，見 docs/design.md「介面：之後」。）
  */
-import type { Dir, SubVec } from '../core/hex';
-import { DIR_NAME, SUB, hexLen } from '../core/hex';
-import { DIR_GLYPH, dirAngle, vecAngle } from '../render/geometry';
+import type { Dir } from '../core/hex';
+import { DIR_NAME } from '../core/hex';
+import { DIR_GLYPH, dirAngle } from '../render/geometry';
 import type { Readouts } from './config';
 import { $ } from './dom';
 
 export interface HudView {
   chassisName: string;
   driveName: string;
-  velSub: SubVec;
+  heading: Dir;
+  speed: number;
   maxSpeed: number;
   facing: Dir;
   heat: number;
@@ -41,11 +44,9 @@ export class Hud {
   private toastTimer = 0;
 
   update(v: HudView): void {
-    const speed = hexLen(v.velSub);
-    $('hud-speed').textContent = v.readouts.speed === 'NUMERIC'
-      ? (speed / SUB).toFixed(1) + ' 格/回'
-      : speedBand(speed, v.maxSpeed);
-    $('hud-facing').textContent = '朝向 ' + DIR_GLYPH[v.facing] + DIR_NAME[v.facing];
+    const dir = v.speed > 0 ? ' ' + DIR_GLYPH[v.heading] + DIR_NAME[v.heading] : '';
+    $('hud-speed').textContent = (v.readouts.speed === 'NUMERIC' ? `${v.speed} 速` : speedBand(v.speed, v.maxSpeed)) + dir;
+    $('hud-facing').textContent = '機首 ' + DIR_GLYPH[v.facing] + DIR_NAME[v.facing];
     $('hud-drive').textContent = v.driveName;
     $('hud-round').textContent = '第 ' + v.round + ' 回合';
     $('hud-chassis').textContent = v.chassisName;
@@ -63,7 +64,7 @@ export class Hud {
       ? '停機'
       : v.readouts.heat === 'NUMERIC' ? '熱 ' + Math.round(v.heat) : hot ? '過熱警告' : '熱';
 
-    // AP：實心 = 手上的，空心 = 已用掉的配額，紅色 = 債務
+    // AP：實心 = 手上的，空心 = 已用掉的配額；債 = 下回合要從配額扣的
     const pips: string[] = [];
     for (let i = 0; i < v.quota; i++) pips.push(i < v.ap ? '●' : '○');
     const debt = '▮'.repeat(v.debt) + '▯'.repeat(Math.max(0, v.debtCap - v.debt));
@@ -101,7 +102,6 @@ export class Hud {
     ctx.strokeStyle = 'rgba(255,255,255,0.15)';
     ctx.lineWidth = 1;
     ctx.stroke();
-    // 六個方向的刻度
     for (let d = 0 as Dir; d < 6; d = (d + 1) as Dir) {
       const a = dirAngle(d);
       ctx.beginPath();
@@ -110,7 +110,6 @@ export class Hud {
       ctx.strokeStyle = 'rgba(255,255,255,0.3)';
       ctx.stroke();
     }
-    // 朝向：機首
     const f = dirAngle(v.facing);
     ctx.beginPath();
     ctx.moveTo(R + Math.cos(f) * R * 0.62, R + Math.sin(f) * R * 0.62);
@@ -119,10 +118,9 @@ export class Hud {
     ctx.closePath();
     ctx.fillStyle = v.shutdown ? '#ff5a5a' : '#4fd6ff';
     ctx.fill();
-    // 速度向量：長度 ∝ 速度 / 極速
-    const a = vecAngle(v.velSub);
-    if (a !== null) {
-      const len = Math.min(1, hexLen(v.velSub) / Math.max(1, v.maxSpeed)) * (R - 4);
+    if (v.speed > 0) {
+      const a = dirAngle(v.heading);
+      const len = Math.min(1, v.speed / Math.max(1, v.maxSpeed)) * (R - 4);
       const tx = R + Math.cos(a) * len;
       const ty = R + Math.sin(a) * len;
       ctx.strokeStyle = '#ffd166';

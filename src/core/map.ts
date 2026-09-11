@@ -1,5 +1,5 @@
 /**
- * 地圖（§8）。
+ * 地圖。
  *
  * 檔案格式是「odd-q 位移座標」的逐列字串：第 row 列第 col 個字元就是那一格的地形字元，
  * 奇數欄往下錯半格 —— 這樣在文字編輯器裡改圖時，看到的形狀大致就是遊戲裡的形狀。
@@ -9,11 +9,10 @@ import type { Dir, Hex } from './hex';
 import { vec } from './hex';
 import type { Rules } from './rules';
 
+/** 一格。地形目前不影響移動（先無視地形限制），elevation 與 blocksLos 留給日後的視線。 */
 export interface Cell {
   terrain: string;
   elevation: number;
-  dragModifier: number;
-  passable: boolean;
   blocksLos: boolean;
 }
 
@@ -53,7 +52,7 @@ export function hexToOffset(h: Hex): { col: number; row: number } {
   return { col: h.q, row: h.r + (h.q - (h.q & 1)) / 2 };
 }
 
-/** 讀圖並驗證：尺寸、未知字元、出生點必須落在可進入的格子上。 */
+/** 讀圖並驗證：尺寸、未知字元、出生點必須在地圖內。 */
 export function loadMap(rules: Rules, raw: RawMap): GameMap {
   const errors: string[] = [];
   const byGlyph = new Map<string, string>();
@@ -72,17 +71,11 @@ export function loadMap(rules: Rules, raw: RawMap): GameMap {
       const id = byGlyph.get(g);
       if (!id) {
         errors.push(`地圖 ${raw.id}：(${col},${row}) 是未知的地形字元 "${g}"`);
-        cells.push({ terrain: 'open', elevation: 0, dragModifier: 0, passable: true, blocksLos: false });
+        cells.push({ terrain: 'open', elevation: 0, blocksLos: false });
         continue;
       }
       const t = rules.terrain[id];
-      cells.push({
-        terrain: id,
-        elevation: t.elevation,
-        dragModifier: t.dragModifier,
-        passable: t.passable,
-        blocksLos: t.blocksLos,
-      });
+      cells.push({ terrain: id, elevation: t.elevation, blocksLos: t.blocksLos });
     }
   });
 
@@ -98,8 +91,7 @@ export function loadMap(rules: Rules, raw: RawMap): GameMap {
 
   if (errors.length === 0) {
     for (const s of [map.playerSpawn, ...map.enemySpawns]) {
-      const c = cellAt(map, s.hex);
-      if (!c || !c.passable) errors.push(`地圖 ${raw.id}：出生點 (${s.hex.q},${s.hex.r}) 不可進入`);
+      if (!cellAt(map, s.hex)) errors.push(`地圖 ${raw.id}：出生點 (${s.hex.q},${s.hex.r}) 在地圖外`);
     }
   }
   if (errors.length) throw new Error(errors.join('\n'));

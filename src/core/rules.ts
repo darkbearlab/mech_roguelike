@@ -1,7 +1,7 @@
 /**
- * 規則資料（§10）：把 data/*.json 讀成有型別的表。
+ * 規則資料：把 data/*.json 讀成有型別的表。
  *
- * **所有平衡數值都從這裡來**（§1）。core/ 其他檔案一律透過 GameState.rules 取值，
+ * **所有平衡數值都從這裡來**。core/ 其他檔案一律透過 GameState.rules 取值，
  * 不直接 import JSON —— 這樣 bot 可以拿兩份不同的 Rules 做 A/B，
  * 介面的調參面板也只是「換一份 Rules」而已。
  *
@@ -12,30 +12,38 @@ import chassisJson from '../data/chassis.json';
 import actionsJson from '../data/actions.json';
 import terrainJson from '../data/terrain.json';
 import combatJson from '../data/combat.json';
-import { SUB } from './hex';
 
 export interface TurnRule {
   /** 每回合免費轉幾面。'ANY' = 不限。 */
   freeFacesPerTurn: number | 'ANY';
 }
 
+/** 相對機首的四個扇區：前、左右前（偏 60°）、左右後（偏 120°）、正後。 */
+export type Sector = 'front' | 'frontSide' | 'rearSide' | 'rear';
+
+export const SECTORS: readonly Sector[] = ['front', 'frontSide', 'rearSide', 'rear'];
+
 export interface DriveDef {
   id: string;
   name: string;
-  thrust: number;
-  drag: number;
+  /** 極速（格/回合）。 */
   maxSpeed: number;
+  /** 左盤每個扇區最多能點幾下。 */
+  taps: Record<Sector, number>;
+  /** 速度方向改變 60° / 120° 時的折損。 */
+  turnLoss: { d60: number; d120: number };
+  /** 沒有加速的回合，速度自然減少多少。 */
+  decay: number;
+  /** 右盤每轉一面，當下速度扣多少。 */
+  facingTurnSpeedLoss: number;
   turnRule: TurnRule;
-  /** 能否往前方三面以外加速（§3.2）。 */
-  sideAccel: boolean;
-  /** 每 10 sub 的實際加速量產生多少熱。 */
-  heatPerAccel: number;
+  /** 左盤每點一下的產熱。 */
+  heatPerTap: number;
 }
 
 export interface ChassisDef {
   id: string;
   name: string;
-  mass: number;
   /** 第一個是出擊時的驅動模式。 */
   drives: string[];
   apQuota: number;
@@ -70,15 +78,13 @@ export interface EconomyDef {
   overheatShutdownPhases: number;
 }
 
+/** 地形。目前只有外觀與日後視線用的資料 —— 地形不影響移動（先無視地形限制，之後再討論）。 */
 export interface TerrainDef {
   id: string;
   name: string;
   glyph: string;
-  passable: boolean;
-  blocksLos: boolean;
   elevation: number;
-  dragModifier: number;
-  sensorBonus: number;
+  blocksLos: boolean;
 }
 
 export interface CombatDef {
@@ -118,7 +124,7 @@ export const RAW_RULES: RawRules = {
   combat: combatJson,
 };
 
-/** 去掉 `_` 註解鍵。 */
+/** 去掉 `_` 註解鍵（只看第一層）。 */
 function entries(o: Record<string, unknown>): [string, Record<string, unknown>][] {
   return Object.entries(o)
     .filter(([k]) => !k.startsWith('_'))
@@ -137,6 +143,12 @@ function strip<T>(o: Record<string, unknown>, id: string): T {
  */
 export function loadRules(raw: RawRules): Rules {
   const errors: string[] = [];
+  /** 速度、點數、折損都是「格」，一律整數。 */
+  const int = (where: string, v: unknown, min = -Infinity): void => {
+    if (typeof v !== 'number' || !Number.isInteger(v) || v < min) {
+      errors.push(`${where} 必須是 ≥ ${min} 的整數（現在是 ${JSON.stringify(v)}）`);
+    }
+  };
   const num = (where: string, v: unknown, min = -Infinity): void => {
     if (typeof v !== 'number' || !Number.isFinite(v) || v < min) {
       errors.push(`${where} 必須是 ≥ ${min} 的數字（現在是 ${JSON.stringify(v)}）`);
@@ -145,30 +157,26 @@ export function loadRules(raw: RawRules): Rules {
   const bool = (where: string, v: unknown): void => {
     if (typeof v !== 'boolean') errors.push(`${where} 必須是 true/false`);
   };
-  /** 會拿去當「長度」用的值必須是整數 sub：scaleToLength 的不超長保證依賴這一點。 */
-  const int = (where: string, v: unknown, min = -Infinity): void => {
-    num(where, v, min);
-    if (typeof v === 'number' && Number.isFinite(v) && !Number.isInteger(v)) errors.push(`${where} 必須是整數`);
-  };
 
   const drives: Record<string, DriveDef> = {};
   for (const [id, o] of entries(raw.drives)) {
     const d = strip<DriveDef>(o, id);
-    num(`drives.${id}.thrust`, d.thrust, 0);
-    int(`drives.${id}.drag`, d.drag, 0);
     int(`drives.${id}.maxSpeed`, d.maxSpeed, 0);
-    num(`drives.${id}.heatPerAccel`, d.heatPerAccel, 0);
-    bool(`drives.${id}.sideAccel`, d.sideAccel);
+    for (const s of SECTORS) int(`drives.${id}.taps.${s}`, d.taps?.[s], 0);
+    int(`drives.${id}.turnLoss.d60`, d.turnLoss?.d60, 0);
+    int(`drives.${id}.turnLoss.d120`, d.turnLoss?.d120, 0);
+    int(`drives.${id}.decay`, d.decay, 0);
+    int(`drives.${id}.facingTurnSpeedLoss`, d.facingTurnSpeedLoss, 0);
+    num(`drives.${id}.heatPerTap`, d.heatPerTap, 0);
     const free = d.turnRule?.freeFacesPerTurn;
-    if (free !== 'ANY') num(`drives.${id}.turnRule.freeFacesPerTurn`, free, 0);
+    if (free !== 'ANY') int(`drives.${id}.turnRule.freeFacesPerTurn`, free, 0);
     drives[id] = d;
   }
 
   const chassis: Record<string, ChassisDef> = {};
   for (const [id, o] of entries(raw.chassis)) {
     const c = strip<ChassisDef>(o, id);
-    num(`chassis.${id}.mass`, c.mass, 1);
-    num(`chassis.${id}.apQuota`, c.apQuota, 0);
+    int(`chassis.${id}.apQuota`, c.apQuota, 0);
     num(`chassis.${id}.heatCap`, c.heatCap, 1);
     num(`chassis.${id}.heatPassive`, c.heatPassive, 0);
     num(`chassis.${id}.sensorRange`, c.sensorRange, 0);
@@ -192,14 +200,14 @@ export function loadRules(raw: RawRules): Rules {
     }
     const a = strip<ActionDef>(o, id);
     a.requires = a.requires ?? [];
-    num(`actions.${id}.ap`, a.ap, 0);
+    int(`actions.${id}.ap`, a.ap, 0);
     num(`actions.${id}.heat`, a.heat);
     actions[id] = a;
   }
 
   const economy = strip<EconomyDef>(raw.actions.economy as Record<string, unknown>, 'economy');
-  num('economy.apDebtCap', economy.apDebtCap, 0);
-  num('economy.overheatShutdownPhases', economy.overheatShutdownPhases, 1);
+  int('economy.apDebtCap', economy.apDebtCap, 0);
+  int('economy.overheatShutdownPhases', economy.overheatShutdownPhases, 1);
   delete (economy as unknown as Record<string, unknown>).id;
 
   const terrain: Record<string, TerrainDef> = {};
@@ -212,10 +220,8 @@ export function loadRules(raw: RawRules): Rules {
       errors.push(`terrain.${id}.glyph "${t.glyph}" 與其他地形重複`);
     }
     glyphs.add(t.glyph);
-    bool(`terrain.${id}.passable`, t.passable);
     bool(`terrain.${id}.blocksLos`, t.blocksLos);
     int(`terrain.${id}.elevation`, t.elevation);
-    int(`terrain.${id}.dragModifier`, t.dragModifier);
     terrain[id] = t;
   }
 
@@ -231,21 +237,35 @@ export const RULES: Rules = loadRules(RAW_RULES);
 
 // ---------------------------------------------------------------- 覆寫
 
+type DeepPartial<T> = { [K in keyof T]?: T[K] extends object ? DeepPartial<T[K]> : T[K] };
+
 /** 深層部分覆寫：調參面板與 bot 的 A/B 用。 */
 export type RulesPatch = {
-  drives?: Record<string, Partial<Omit<DriveDef, 'id'>>>;
-  chassis?: Record<string, Partial<Omit<ChassisDef, 'id'>>>;
-  terrain?: Record<string, Partial<Omit<TerrainDef, 'id'>>>;
+  drives?: Record<string, DeepPartial<Omit<DriveDef, 'id'>>>;
+  chassis?: Record<string, DeepPartial<Omit<ChassisDef, 'id'>>>;
+  terrain?: Record<string, DeepPartial<Omit<TerrainDef, 'id'>>>;
   economy?: Partial<EconomyDef>;
 };
+
+function isPlain(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
+/** 把 patch 逐層併進 target（就地）。陣列與純值整個取代。 */
+function mergeInto(target: Record<string, unknown>, patch: Record<string, unknown>): void {
+  for (const [k, v] of Object.entries(patch)) {
+    if (isPlain(v) && isPlain(target[k])) mergeInto(target[k] as Record<string, unknown>, v);
+    else target[k] = v;
+  }
+}
 
 /** 回傳一份套用過覆寫的新 Rules；不改動傳入的物件。指向不存在的 id 的覆寫會被忽略。 */
 export function withPatch(base: Rules, patch: RulesPatch): Rules {
   const next: Rules = structuredClone(base);
-  const merge = <T extends object>(table: Record<string, T>, p?: Record<string, Partial<T>>): void => {
+  const merge = (table: Record<string, unknown>, p?: Record<string, unknown>): void => {
     if (!p) return;
     for (const [id, fields] of Object.entries(p)) {
-      if (table[id]) Object.assign(table[id], fields);
+      if (isPlain(table[id]) && isPlain(fields)) mergeInto(table[id] as Record<string, unknown>, fields);
     }
   };
   merge(next.drives, patch.drives);
@@ -253,11 +273,4 @@ export function withPatch(base: Rules, patch: RulesPatch): Rules {
   merge(next.terrain, patch.terrain);
   if (patch.economy) Object.assign(next.economy, patch.economy);
   return next;
-}
-
-// ---------------------------------------------------------------- 衍生值
-
-/** §3.2：`accel = round(thrust / mass × SUB)`。 */
-export function accelOf(rules: Rules, chassisId: string, driveId: string): number {
-  return Math.round((rules.drives[driveId].thrust / rules.chassis[chassisId].mass) * SUB);
 }

@@ -147,7 +147,7 @@ button {
   font-variant-numeric: tabular-nums;
 }
 
-/* 資訊層 LIGHT：沒有熱量條，只有一顆警告燈（§9） */
+/* 資訊層 LIGHT：沒有熱量條，只有一顆警告燈 */
 .heat.light-only {
   flex: 0 0 auto;
   min-width: 64px;
@@ -297,12 +297,44 @@ button {
   font-size: 14px;
 }
 
-.move-key[data-key='CRUISE'] .key-main,
-.move-key[data-key='BRAKE'] .key-main {
-  font-size: 15px;
+.pad-blank {
+  min-height: 52px;
 }
 
-/* 會造成透支（§9 警示色） */
+/* 左盤：點數用實心／空心圓點表示，所以字距要鬆一點 */
+.move-key .key-sub {
+  letter-spacing: 0.08em;
+  font-size: 11px;
+}
+
+/* 已選的方向 */
+.key.key-selected {
+  background: #2d2614;
+  border-color: var(--amber);
+}
+
+.key.key-selected .key-main,
+.key.key-selected .key-sub {
+  color: var(--amber);
+}
+
+/* 中間的確認鍵（roguelike 的「空過」鍵） */
+.confirm-key {
+  border-color: rgba(79, 214, 255, 0.45);
+  background: #13222c;
+}
+
+.confirm-key .key-main {
+  font-size: 15px;
+  color: var(--cyan);
+}
+
+.confirm-key .key-sub {
+  color: var(--text);
+  font-size: 11px;
+}
+
+/* 會造成透支（警示色） */
 .key.key-warn {
   border-color: var(--warn);
   background: #2a2112;

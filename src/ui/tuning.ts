@@ -131,7 +131,10 @@ export class TuningPanel {
 
     const head = h('div', 'tune-head');
     const title = h('div');
-    title.append(h('b', '', '調參（手感測試）'), h('br'), h('small', '', 'build ' + BUILD_ID));
+    // 畫面尺寸：地圖用的是畫布實際的大小；瀏覽器回報的 innerWidth 列在旁邊，兩個不一樣時截圖給我
+    const cv = $('map');
+    const screen = `畫面 ${cv.clientWidth}×${cv.clientHeight} @${window.devicePixelRatio || 1}x（innerWidth ${window.innerWidth}）`;
+    title.append(h('b', '', '調參（手感測試）'), h('br'), h('small', '', `build ${BUILD_ID} · ${screen}`));
     head.append(title);
     const close = h('button', 'tune-x', '✕');
     close.type = 'button';

@@ -7,5 +7,10 @@
     "name": "標準火控",
     "tracking": 8,
     "aptitude": { "rifle": 75 }
+  },
+  "tank": {
+    "name": "戰車火控",
+    "tracking": 10,
+    "aptitude": { "rifle": 55 }
   }
 }

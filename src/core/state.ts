@@ -56,11 +56,13 @@ export interface Unit {
  * - IDLE：不動
  * - PATROL：依序往每個巡邏點開，到了（1 格內）就換下一個，繞圈
  * - DUEL：敵機（ai.ts）—— 跟玩家用同一套規則移動、射擊
+ * - GUARD：守衛（地城的戰車）—— 還沒發現你之前原地不動；感測距離內看得到你、或被打了，就醒來照 DUEL 打
  */
 export type Script =
   | { kind: 'IDLE' }
   | { kind: 'PATROL'; points: Hex[]; next: number }
-  | { kind: 'DUEL' };
+  | { kind: 'DUEL' }
+  | { kind: 'GUARD'; awake: boolean };
 
 /** 這一局的射擊紀錄：玩家打出去的，與敵方打過來的。 */
 export interface Stats {
@@ -127,8 +129,8 @@ export type Command =
   | { type: 'SWITCH_DRIVE' }
   | { type: 'WAIT' };
 
-/** 擋路的東西。地形目前不擋路（先無視地形限制），所以只有地圖邊緣與其他機體。 */
-export type Blocker = 'EDGE' | 'UNIT';
+/** 擋路的東西：地圖邊緣、開不進去的地形（牆、殘骸）、其他機體。 */
+export type Blocker = 'EDGE' | 'WALL' | 'UNIT';
 
 export interface Collision {
   /** 撞上的那一格（沒進去）。 */
@@ -165,6 +167,8 @@ export type GameEvent =
   | { type: 'DESTROYED'; unitId: string; by: string }
   | { type: 'RELOADED'; unitId: string; ammo: number }
   | { type: 'SPAWNED'; unitId: string }
+  /** 守衛醒了：看到你（SPOTTED）或被開槍打了（SHOT，打中打不中都算）。 */
+  | { type: 'ALERTED'; unitId: string; why: 'SPOTTED' | 'SHOT' }
   /** 通過跑道的第 index 個檢查點（0 起算）。 */
   | { type: 'CHECKPOINT'; index: number; id: string; round: number }
   /** 檢查點的事件鉤子觸發了。core 不解讀 hook 的內容，由訂閱的系統處理。 */

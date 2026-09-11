@@ -5,7 +5,7 @@
  * 「複製調整值」把 patch 印成 JSON —— 貼回來，就能寫進 data/。
  * 面板本身不碰 core/ 的任何狀態；它只產生一份新的 Rules，由 Game 換上。
  */
-import { RAW_MAPS } from '../core/content';
+import { DUNGEON_ID, RAW_MAPS } from '../core/content';
 import { driveProfile } from '../core/movement';
 import type { DriveProfile } from '../core/movement';
 import type { Rules, RulesPatch } from '../core/rules';
@@ -148,8 +148,9 @@ export class TuningPanel {
     // 地圖：跑道（情境測試）或試驗場（自由移動）
     const maps = h('div', 'tune-chassis');
     for (const m of RAW_MAPS) {
-      const icon = m.course ? '🏁 ' : m.units?.some((u) => u.ai === 'DUEL') ? '⚔ ' : '';
-      const b = h('button', m.id === this.host.map() ? 'on' : '', icon + m.name);
+      const icon = m.id === DUNGEON_ID ? '🗺 ' : m.course ? '🏁 ' : m.units?.some((u) => u.ai === 'DUEL') ? '⚔ ' : '';
+      const label = icon + m.name + (m.id === DUNGEON_ID && m.id === this.host.map() ? '（再點＝換一張）' : '');
+      const b = h('button', m.id === this.host.map() ? 'on' : '', label);
       b.type = 'button';
       b.addEventListener('click', () => {
         this.host.setMap(m.id);

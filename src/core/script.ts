@@ -19,9 +19,14 @@ function patrolGoal(u: Unit): Unit['pos'] | null {
   return sc.points[sc.next];
 }
 
-/** 機動宣告：巡邏的先把機首轉向目標（靶機轉向免費），再往目標開；其餘不動。 */
+/** 這個自動單位現在是不是在打仗：敵機，或已經醒了的守衛。 */
+export function hunting(u: Unit): boolean {
+  return u.script?.kind === 'DUEL' || (u.script?.kind === 'GUARD' && u.script.awake);
+}
+
+/** 機動宣告：敵機照 AI；巡邏的先把機首轉向目標（靶機轉向免費），再往目標開；其餘（含還沒醒的守衛）不動。 */
 export function scriptDeclare(s: GameState, u: Unit): Declaration {
-  if (u.script?.kind === 'DUEL') return duelDeclare(s, u);
+  if (hunting(u)) return duelDeclare(s, u);
   const goal = patrolGoal(u);
   if (!goal || u.shutdown > 0) return { turn: 0, order: null };
   const want = turnDelta(u.facing, dirToward(u.pos, goal, u.facing));

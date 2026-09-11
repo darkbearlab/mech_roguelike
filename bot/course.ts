@@ -24,8 +24,13 @@ export interface CourseResult {
   kills: number;
   /** 這一局總共出現過幾個靶。 */
   targets: number;
-  /** 玩家總共按了幾下（左盤點數 + 確認 + 右盤每個行動）。 */
+  /** 玩家總共按了幾下（左盤轉向面數 + 點數 + 確認 + 右盤每個行動）。 */
   inputs: number;
+  /** 被打爆了（地城之類有敵人的跑道）。 */
+  died: boolean;
+  hpLeft: number;
+  /** 這一局有幾台敵人（role ENEMY，例如地城的輕戰車）。 */
+  enemies: number;
 }
 
 export function runCourse(rules: Rules, map: GameMap, chassis: string, maxTurns = 120, seed = 1): CourseResult {
@@ -34,7 +39,7 @@ export function runCourse(rules: Rules, map: GameMap, chassis: string, maxTurns 
   let s = newGame(rules, map, { seed, player: { chassis } });
   const r: CourseResult = {
     chassis, finished: false, turns: maxTurns, splits: [], heatPeak: 0, collisions: 0,
-    shots: 0, hits: 0, kills: 0, targets: 0, inputs: 0,
+    shots: 0, hits: 0, kills: 0, targets: 0, inputs: 0, died: false, hpLeft: 0, enemies: 0,
   };
   const goal = (st: GameState) => {
     const cp = course.checkpoints[Math.min(st.course!.next, course.checkpoints.length - 1)];
@@ -56,5 +61,8 @@ export function runCourse(rules: Rules, map: GameMap, chassis: string, maxTurns 
   r.hits = s.stats.hits;
   r.kills = s.stats.kills;
   r.targets = s.units.filter((u) => rules.chassis[u.chassis].role === 'TARGET').length;
+  r.enemies = s.units.filter((u) => rules.chassis[u.chassis].role === 'ENEMY').length;
+  r.died = s.over?.winner === 'ENEMY';
+  r.hpLeft = s.units.find((u) => u.id === 'player')!.hp;
   return r;
 }

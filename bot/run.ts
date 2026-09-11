@@ -11,7 +11,7 @@
  */
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { parseArgs } from 'node:util';
-import { RAW_MAPS, rawMapById } from '../src/core/content';
+import { DUNGEON_ID, RAW_MAPS, rawMapById, rawMapFor } from '../src/core/content';
 import { loadMap } from '../src/core/map';
 import { driveProfile } from '../src/core/movement';
 import { RULES, pilotChassis } from '../src/core/rules';
@@ -91,7 +91,8 @@ console.log('\n（平均回合與格/回合只算抵達的場次；複合機的�
 // ---------------------------------------------------------------- 情境：跑道
 
 const courses: { map: string; results: CourseResult[] }[] = [];
-for (const rawCourse of RAW_MAPS.filter((m) => m.course)) {
+// 地城是產生的，下面另外跑很多張
+for (const rawCourse of RAW_MAPS.filter((m) => m.course && m.id !== DUNGEON_ID)) {
   const cmap = loadMap(RULES, rawCourse);
   // 有靶的跑道（射擊場）命中率會隨擲骰變：跑 runs 個種子取總和；純跑道一個種子就夠
   const hasTargets = cmap.units.length > 0 || cmap.course!.checkpoints.some((c) => c.hooks.some((h) => h.type === 'SPAWN'));
@@ -168,9 +169,37 @@ for (const rawDuel of RAW_MAPS.filter((m) => m.units?.some((u) => u.ai === 'DUEL
   duels.push({ map: dmap.id, results });
 }
 
+// ---------------------------------------------------------------- 情境：地城（過得了關嗎）
+
+const DUNGEON_TURNS = 150;
+const dungeon: CourseResult[] = [];
+console.log(`\n情境：地城（每台跑 ${runs} 張產生的地城，種子 ${seed0}..${seed0 + runs - 1}；上限 ${DUNGEON_TURNS} 回合）`);
+console.log('自動駕駛只是往出口開、路上打得中就打（不會刻意繞開或清場）—— 過關率是「笨方法也過得了嗎」的下限。');
+console.log('機體       過關率  被打爆  逾時  平均回合  剩餘耐久  擊毀戰車    命中率  操作/回合');
+for (const id of ids) {
+  const rs = Array.from({ length: runs }, (_, i) => {
+    const m = loadMap(RULES, rawMapFor(DUNGEON_ID, seed0 + i)!);
+    return runCourse(RULES, m, id, DUNGEON_TURNS, seed0 + i);
+  });
+  dungeon.push(...rs);
+  const cleared = rs.filter((r) => r.finished);
+  const sum = (f: (r: CourseResult) => number) => rs.reduce((a, r) => a + f(r), 0);
+  console.log(
+    `${RULES.chassis[id].name.padEnd(9)}`,
+    pad(((cleared.length / rs.length) * 100).toFixed(0) + '%', 6),
+    pad(rs.filter((r) => r.died).length, 6),
+    pad(rs.filter((r) => !r.finished && !r.died).length, 5),
+    pad(cleared.length ? avg(cleared, (r) => r.turns).toFixed(1) : '—', 8),
+    pad(cleared.length ? avg(cleared, (r) => r.hpLeft).toFixed(0) : '—', 8),
+    pad(`${sum((r) => r.kills)}/${sum((r) => r.enemies)}`, 10),
+    pad(sum((r) => r.shots) ? ((sum((r) => r.hits) / sum((r) => r.shots)) * 100).toFixed(0) + '%' : '—', 8),
+    pad(avg(rs, (r) => r.inputs / r.turns).toFixed(1), 9),
+  );
+}
+
 if (values.json) {
   mkdirSync('bot/out', { recursive: true });
   const path = `bot/out/baseline-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
-  writeFileSync(path, JSON.stringify({ map: map.id, runs, seed: seed0, maxTurns, results: all, courses, duels }, null, 1));
+  writeFileSync(path, JSON.stringify({ map: map.id, runs, seed: seed0, maxTurns, results: all, courses, duels, dungeon }, null, 1));
   console.log('已寫入 ' + path);
 }

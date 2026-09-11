@@ -11,11 +11,13 @@ import { vec } from './hex';
 import type { Rules } from './rules';
 import type { Script } from './state';
 
-/** 一格。地形目前不影響移動（先無視地形限制），elevation 與 blocksLos 留給日後的視線。 */
+/** 一格：地形、能不能走、擋不擋視線、半掩體扣幾點（照 terrain.json）。 */
 export interface Cell {
   terrain: string;
   elevation: number;
   blocksLos: boolean;
+  passable: boolean;
+  cover: number;
 }
 
 export interface Spawn {
@@ -41,7 +43,8 @@ export interface RawCheckpoint {
  * 用檢查點的 SPAWN 鉤子帶同樣的欄位。
  * - patrol：巡邏點（位移座標）
  * - ai: 'DUEL'：敵機，跟玩家用同一套規則移動、射擊（ai.ts）
- * 兩個都沒有就是原地不動。
+ * - ai: 'GUARD'：守衛，發現你（或被打）之前原地不動，醒了就照 DUEL 打
+ * 都沒有就是原地不動。
  */
 export interface RawUnit {
   id?: string;
@@ -122,26 +125,24 @@ export function loadMap(rules: Rules, raw: RawMap): GameMap {
       const id = byGlyph.get(g);
       if (!id) {
         errors.push(`地圖 ${raw.id}：(${col},${row}) 是未知的地形字元 "${g}"`);
-        cells.push({ terrain: 'open', elevation: 0, blocksLos: false });
+        cells.push({ terrain: 'open', elevation: 0, blocksLos: false, passable: true, cover: 0 });
         continue;
       }
       const t = rules.terrain[id];
-      cells.push({ terrain: id, elevation: t.elevation, blocksLos: t.blocksLos });
+      cells.push({ terrain: id, elevation: t.elevation, blocksLos: t.blocksLos, passable: t.passable, cover: t.cover });
     }
   });
 
   /** 自動單位（靶、敵機）：開局的 units 與 SPAWN 鉤子共用同一個格式。 */
   const toSpawn = (u: RawUnit, where: string): UnitSpawn => {
     if (!rules.chassis[u.chassis]) errors.push(`地圖 ${raw.id}：${where} 的機體 "${u.chassis}" 不存在`);
-    if (u.ai !== undefined && u.ai !== 'DUEL') errors.push(`地圖 ${raw.id}：${where} 的 ai 只能是 DUEL（現在是 "${u.ai}"）`);
-    const spawn: UnitSpawn = {
-      chassis: u.chassis,
-      hex: offsetToHex(u.col, u.row),
-      facing: u.facing ?? 3,
-      script: u.patrol && u.patrol.length > 0
-        ? { kind: 'PATROL', points: u.patrol.map(([c, r]) => offsetToHex(c, r)), next: 0 }
-        : u.ai === 'DUEL' ? { kind: 'DUEL' } : { kind: 'IDLE' },
-    };
+    if (u.ai !== undefined && u.ai !== 'DUEL' && u.ai !== 'GUARD') {
+      errors.push(`地圖 ${raw.id}：${where} 的 ai 只能是 DUEL 或 GUARD（現在是 "${u.ai}"）`);
+    }
+    const script: Script = u.patrol && u.patrol.length > 0
+      ? { kind: 'PATROL', points: u.patrol.map(([c, r]) => offsetToHex(c, r)), next: 0 }
+      : u.ai === 'DUEL' ? { kind: 'DUEL' } : u.ai === 'GUARD' ? { kind: 'GUARD', awake: false } : { kind: 'IDLE' };
+    const spawn: UnitSpawn = { chassis: u.chassis, hex: offsetToHex(u.col, u.row), facing: u.facing ?? 3, script };
     if (u.id !== undefined) spawn.id = u.id;
     return spawn;
   };
@@ -215,8 +216,11 @@ export function loadMap(rules: Rules, raw: RawMap): GameMap {
     course?.checkpoints.forEach((c, i) => {
       if (!cellAt(map, c.at)) errors.push(`地圖 ${raw.id}：檢查點 ${i + 1} 的中心在地圖外`);
     });
+    if (cellAt(map, map.playerSpawn.hex)?.passable === false) errors.push(`地圖 ${raw.id}：玩家出生點在開不進去的格子上`);
     for (const { where, spawn } of spawnPlaces) {
-      if (!cellAt(map, spawn.hex)) errors.push(`地圖 ${raw.id}：${where} 的位置在地圖外`);
+      const cell = cellAt(map, spawn.hex);
+      if (!cell) errors.push(`地圖 ${raw.id}：${where} 的位置在地圖外`);
+      else if (!cell.passable) errors.push(`地圖 ${raw.id}：${where} 站在開不進去的格子上`);
       if (spawn.script.kind === 'PATROL' && spawn.script.points.some((p) => !cellAt(map, p))) {
         errors.push(`地圖 ${raw.id}：${where} 的巡邏點在地圖外`);
       }

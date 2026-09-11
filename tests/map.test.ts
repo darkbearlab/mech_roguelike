@@ -29,11 +29,19 @@ describe('地圖', () => {
     expect(rawMapById('nope')).toBeUndefined();
   });
 
-  it('格子帶著地形的高度與視線屬性（地形目前不影響移動）', () => {
-    const m = loadMap(RULES, flatRaw(5, 5, [[1, 1, ','], [3, 1, '#'], [3, 3, '^']]));
-    expect(cellAt(m, offsetToHex(1, 1))).toEqual({ terrain: 'rubble', elevation: 0, blocksLos: false });
-    expect(cellAt(m, offsetToHex(3, 1))).toEqual({ terrain: 'ridge', elevation: 2, blocksLos: true });
+  it('格子帶著地形的高度、視線、能不能走、半掩體（原本的地形照舊開得過去）', () => {
+    const m = loadMap(RULES, flatRaw(5, 5, [[1, 1, ','], [3, 1, '#'], [3, 3, '^'], [1, 3, 'X'], [0, 0, 'o']]));
+    expect(cellAt(m, offsetToHex(1, 1))).toEqual({ terrain: 'rubble', elevation: 0, blocksLos: false, passable: true, cover: 0 });
+    expect(cellAt(m, offsetToHex(3, 1))).toEqual({ terrain: 'ridge', elevation: 2, blocksLos: true, passable: true, cover: 0 });
     expect(cellAt(m, offsetToHex(3, 3))).toMatchObject({ terrain: 'highland', elevation: 1 });
+    expect(cellAt(m, offsetToHex(1, 3))).toMatchObject({ terrain: 'wall', blocksLos: true, passable: false });
+    expect(cellAt(m, offsetToHex(0, 0))).toMatchObject({ terrain: 'debris', blocksLos: false, passable: false, cover: 25 });
+  });
+
+  it('出生點與單位不能站在牆裡', () => {
+    const raw = flatRaw(7, 7, [[3, 3, 'X'], [1, 1, 'o']]);
+    raw.units = [{ chassis: 'target', col: 1, row: 1 }];
+    expect(() => loadMap(RULES, raw)).toThrow(/玩家出生點在開不進去的格子上[\s\S]*units\[0\] 站在開不進去的格子上/);
   });
 
   it('地圖外回傳 null', () => {

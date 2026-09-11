@@ -79,5 +79,20 @@
     "weapon": null,
     "fireControl": null,
     "cockpit": "std"
+  },
+
+  "_tank": "輕戰車（設計者 2026-09-11：地城的敵人是「軟很多的坦克」）：耐久 30（步槍三發）、火控差、履帶（轉向要 AP）。sensorRange = 守衛看得到多遠（還要有視線）。",
+  "tank": {
+    "name": "輕戰車",
+    "role": "ENEMY",
+    "drives": ["tracked"],
+    "apQuota": 1,
+    "heatCap": 100,
+    "heatPassive": 3,
+    "sensorRange": 8,
+    "hp": 30,
+    "weapon": "rifle",
+    "fireControl": "tank",
+    "cockpit": "std"
   }
 }

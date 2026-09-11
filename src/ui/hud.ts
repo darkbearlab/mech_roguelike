@@ -75,12 +75,12 @@ export class Hud {
     this.drawDial(v);
   }
 
-  toast(msg: string, kind: 'info' | 'warn' | 'bad' = 'info'): void {
+  toast(msg: string, kind: 'info' | 'warn' | 'bad' | 'story' = 'info', ms = 2400): void {
     const el = $('toast');
     el.textContent = msg;
     el.className = 'toast show ' + kind;
     window.clearTimeout(this.toastTimer);
-    this.toastTimer = window.setTimeout(() => el.classList.remove('show'), 2400);
+    this.toastTimer = window.setTimeout(() => el.classList.remove('show'), ms);
   }
 
   private drawDial(v: HudView): void {

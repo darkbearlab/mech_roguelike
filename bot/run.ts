@@ -1,20 +1,21 @@
 /**
  * 無介面自動對局：跑 N 場、輸出基線數據。之後每次改平衡都拿它比對。
  *
- *   npm run bot                         每台機體 30 場
+ *   npm run bot                         每台機體 30 場隨機行程 + 每條跑道各跑一次
  *   npm run bot -- --runs 100 --seed 7  場數與起始種子
  *   npm run bot -- --chassis jt1        只跑一台
  *   npm run bot -- --json               另存 bot/out/baseline-<時間>.json
  *
- * 規格要的四個數字裡，平均回合數與熱量峰值現在就是真的；勝率與命中率先印 —，
- * 第 5～7 步接上戰鬥之後由同一支程式填上。
+ * 平均回合數與熱量峰值現在就是真的；勝率與命中率先印 —，接上戰鬥之後由同一支程式填上。
  */
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { parseArgs } from 'node:util';
-import { rawMapById } from '../src/core/content';
+import { RAW_MAPS, rawMapById } from '../src/core/content';
 import { loadMap } from '../src/core/map';
 import { driveProfile } from '../src/core/movement';
 import { RULES } from '../src/core/rules';
+import { runCourse } from './course';
+import type { CourseResult } from './course';
 import { MAX_DIST, MIN_DIST, runOne } from './match';
 import type { RunResult } from './match';
 
@@ -81,11 +82,30 @@ for (const id of ids) {
     pad('—', 5), pad('—', 6),
   );
 }
-console.log('\n（平均回合與格/回合只算抵達的場次；複合機的自動駕駛不切換驅動；勝率與命中率第 5 步之後才有。）');
+console.log('\n（平均回合與格/回合只算抵達的場次；複合機的自動駕駛不切換驅動；勝率與命中率接上戰鬥之後才有。）');
+
+// ---------------------------------------------------------------- 情境：跑道
+
+const courses: { map: string; results: CourseResult[] }[] = [];
+for (const rawCourse of RAW_MAPS.filter((m) => m.course)) {
+  const cmap = loadMap(RULES, rawCourse);
+  const results = ids.map((id) => runCourse(RULES, cmap, id));
+  courses.push({ map: cmap.id, results });
+  console.log(`\n情境：${cmap.name}（${cmap.id}，${cmap.course!.checkpoints.length} 個檢查點）`);
+  console.log('機體       完賽  回合  熱量峰值  撞擊  各檢查點通過的回合');
+  for (const r of results) {
+    console.log(
+      `${RULES.chassis[r.chassis].name.padEnd(9)}`,
+      pad(r.finished ? '✓' : '✗', 4), pad(r.finished ? r.turns : '—', 5),
+      pad(r.heatPeak, 8), pad(r.collisions, 5), ' ', r.splits.join(' '),
+    );
+  }
+}
+console.log('\n（跑道固定、自動駕駛只用玩家能用的指令 —— 同一份規則永遠跑出同一個結果。）');
 
 if (values.json) {
   mkdirSync('bot/out', { recursive: true });
   const path = `bot/out/baseline-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
-  writeFileSync(path, JSON.stringify({ map: map.id, runs, seed: seed0, maxTurns, results: all }, null, 1));
+  writeFileSync(path, JSON.stringify({ map: map.id, runs, seed: seed0, maxTurns, results: all, courses }, null, 1));
   console.log('已寫入 ' + path);
 }

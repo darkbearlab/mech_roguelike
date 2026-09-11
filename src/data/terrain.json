@@ -2,9 +2,11 @@
   "_comment": "地形（地圖的外觀與日後的視線／感測資料）。glyph 是地圖檔 rows 裡的字元。",
   "_movement": "**地形目前不影響移動**：設計者 2026-09-11 說先無視任何地形限制、之後再慢慢討論。所以這裡沒有「不可進入」「減速」之類的欄位 —— 稜線畫得出來，但開得過去。",
   "_los": "elevation 與 blocksLos 是給日後的視線用的，還沒接線。",
+  "_track": "賽道：跑道地圖用的路面，純外觀，讓人看得出路線。",
 
   "open":     { "name": "開闊", "glyph": ".", "elevation": 0, "blocksLos": false },
   "rubble":   { "name": "碎石", "glyph": ",", "elevation": 0, "blocksLos": false },
   "ridge":    { "name": "稜線", "glyph": "#", "elevation": 2, "blocksLos": true },
-  "highland": { "name": "高地", "glyph": "^", "elevation": 1, "blocksLos": false }
+  "highland": { "name": "高地", "glyph": "^", "elevation": 1, "blocksLos": false },
+  "track":    { "name": "賽道", "glyph": "=", "elevation": 0, "blocksLos": false }
 }

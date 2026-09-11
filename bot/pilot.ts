@@ -21,10 +21,17 @@ export interface PilotTurn {
   heatPeak: number;
 }
 
+/** 目標：固定一格，或每次依狀態重算（跑道通過一個檢查點之後，目標就換下一個）。 */
+export type Goal = Hex | ((s: GameState) => { at: Hex; stop: boolean });
+
+function goalOf(g: Goal, s: GameState): { at: Hex; stop: boolean } {
+  return typeof g === 'function' ? g(s) : { at: g, stop: true };
+}
+
 /**
  * @param isThere 位移之後判斷到了沒；到了就不再行動，直接回傳（呼叫端決定要不要結束回合）。
  */
-export function pilotTurn(s0: GameState, unitId: string, goal: Hex, isThere: (s: GameState) => boolean): PilotTurn {
+export function pilotTurn(s0: GameState, unitId: string, goal: Goal, isThere: (s: GameState) => boolean): PilotTurn {
   const events: GameEvent[] = [];
   let heatPeak = unitById(s0, unitId)!.heat;
   const step = (st: GameState, cmd: Command): GameState => {
@@ -35,7 +42,8 @@ export function pilotTurn(s0: GameState, unitId: string, goal: Hex, isThere: (s:
     if (cmd.type !== 'WAIT') heatPeak = Math.max(heatPeak, unitById(r.state, unitId)!.heat);
     return r.state;
   };
-  let s = step(s0, { type: 'ACCEL', order: planAccel(s0, unitId, goal) });
+  const g0 = goalOf(goal, s0);
+  let s = step(s0, { type: 'ACCEL', order: planAccel(s0, unitId, g0.at, { stop: g0.stop }) });
   if (isThere(s)) return { state: s, events, arrivedAfterMove: true, heatPeak };
 
   // 右盤：太熱就散熱；然後把機首轉向目標 —— 能點幾下是看機首的。
@@ -50,7 +58,7 @@ export function pilotTurn(s0: GameState, unitId: string, goal: Hex, isThere: (s:
   }
   for (let guard = 0; guard < 3 && acting(); guard++) {
     const u = unitById(s, unitId)!;
-    const want = dirToward(u.pos, goal, u.facing);
+    const want = dirToward(u.pos, goalOf(goal, s).at, u.facing);
     if (want === u.facing) break;
     const delta: 1 | -1 = turnSteps(rotate(u.facing, 1), want) < turnSteps(u.facing, want) ? 1 : -1;
     const l = checkLegal(s, { type: 'TURN', delta });

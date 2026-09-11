@@ -4,6 +4,7 @@
  * 狀態只能經由 engine.ts 的 applyCommand() 改變。rules 與 map 是不可變的參照：
  * 複製狀態時不會跟著深複製，任何人都不得就地修改它們。
  */
+import type { CourseHook, CourseProgress } from './course';
 import type { Dir, Hex } from './hex';
 import { sameHex } from './hex';
 import type { GameMap } from './map';
@@ -80,7 +81,9 @@ export interface GameState {
   steps: Step[];
   cursor: number;
   rng: RngState;
-  /** 勝敗判定（第 5 步起才會有值）。 */
+  /** 跑道進度（地圖有跑道時才有）。 */
+  course: CourseProgress | null;
+  /** 勝敗判定：跑完跑道、或（之後）一方全滅。 */
   over: null | { winner: Side | 'DRAW' };
 }
 
@@ -124,6 +127,12 @@ export type GameEvent =
   | { type: 'OVERHEAT'; unitId: string }
   | { type: 'REBOOT'; unitId: string }
   | { type: 'WAITED'; unitId: string }
+  /** 通過跑道的第 index 個檢查點（0 起算）。 */
+  | { type: 'CHECKPOINT'; index: number; id: string; round: number }
+  /** 檢查點的事件鉤子觸發了。core 不解讀 hook 的內容，由訂閱的系統處理。 */
+  | { type: 'COURSE_HOOK'; index: number; checkpointId: string; hook: CourseHook; round: number }
+  /** 跑完整條跑道。 */
+  | { type: 'COURSE_DONE'; round: number }
   /** 階段結束的原因：主動待機、AP 用完、透支結算、停機。 */
   | { type: 'PHASE_END'; unitId: string; reason: 'WAIT' | 'AP_SPENT' | 'OVERDRAFT' | 'SHUTDOWN' };
 

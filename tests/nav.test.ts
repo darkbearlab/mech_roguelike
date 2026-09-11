@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { pilotTurn } from '../bot/pilot';
+import { runCourse } from '../bot/course';
 import { runOne } from '../bot/match';
 import { rawMapById } from '../src/core/content';
 import { hexDist } from '../src/core/hex';
@@ -66,5 +67,17 @@ describe('bot（可重現的自動對局）', () => {
     const b = runOne(RULES, map, 'wk1', 11, 40);
     expect(a).toEqual(b);
     expect(a.distance).toBeGreaterThanOrEqual(12);
+  });
+
+  it('情境：四台試驗機都跑得完基礎跑道，檢查點依序通過，而且結果可重現', () => {
+    const map = loadMap(RULES, rawMapById('track_01')!);
+    for (const id of Object.keys(RULES.chassis)) {
+      const r = runCourse(RULES, map, id);
+      expect(r.finished, id).toBe(true);
+      expect(r.splits).toHaveLength(11);
+      expect([...r.splits].sort((x, y) => x - y)).toEqual(r.splits);
+      expect(runCourse(RULES, map, id)).toEqual(r);
+    }
+    expect(() => runCourse(RULES, loadMap(RULES, rawMapById('proving_ground')!), 'jt1')).toThrow('沒有跑道');
   });
 });

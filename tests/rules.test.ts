@@ -12,7 +12,7 @@ describe('資料檔讀取', () => {
   it('預設資料讀得進來，註解鍵被略過', () => {
     expect(Object.keys(RULES.drives).sort()).toEqual(['jet', 'tracked', 'walker']);
     expect(Object.keys(RULES.chassis).sort()).toEqual(['hy1', 'jt1', 'tk1', 'wk1']);
-    expect(Object.keys(RULES.terrain).sort()).toEqual(['highland', 'open', 'ridge', 'rubble']);
+    expect(Object.keys(RULES.terrain).sort()).toEqual(['highland', 'open', 'ridge', 'rubble', 'track']);
     expect(Object.keys(RULES.actions).sort()).toEqual([...ACTION_IDS].sort());
     for (const d of Object.values(RULES.drives)) expect(Object.keys(d).some((k) => k.startsWith('_'))).toBe(false);
     expect('id' in RULES.economy).toBe(false);

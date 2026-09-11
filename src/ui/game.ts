@@ -7,6 +7,8 @@
  *
  * 左盤的「點了哪個方向、點了幾下」是介面狀態（還沒確認），放在這裡，不進 GameState。
  */
+import { hooksOf } from '../core/course';
+import type { CourseHook } from '../core/course';
 import { applyCommand, checkLegal, newGame, turnPrice } from '../core/engine';
 import type { Hex } from '../core/hex';
 import { hexDist, hexRound } from '../core/hex';
@@ -32,6 +34,7 @@ import { $ } from './dom';
 import { Hud } from './hud';
 import { Pads } from './pads';
 import type { ConfirmView, FuncKeyView, MoveKeyView } from './pads';
+import { bestOf, recordFinish, savePrefs } from './prefs';
 import { TuningPanel, loadPatch } from './tuning';
 
 export interface GameOptions {
@@ -64,6 +67,7 @@ export class Game {
   private map!: GameMap;
   private bounds!: WorldBounds;
   private chassis: string;
+  private mapId: string;
 
   private canvas = $('map') as HTMLCanvasElement;
   private ctx = this.canvas.getContext('2d')!;
@@ -86,6 +90,7 @@ export class Game {
 
   constructor(private opts: GameOptions) {
     this.chassis = opts.chassis;
+    this.mapId = opts.mapId;
     this.pads = new Pads($('move-pad'), $('func-pad'), {
       tap: (rel) => this.tap(rel as RelDir),
       confirm: () => this.confirm(),
@@ -98,10 +103,18 @@ export class Game {
       rules: () => this.rules,
       base: () => RULES,
       chassis: () => this.chassis,
+      map: () => this.mapId,
       patch: () => this.patch,
       setPatch: (p) => this.applyPatch(p),
       setChassis: (id) => {
         this.chassis = id;
+        this.savePrefs();
+        this.restart();
+      },
+      setMap: (id) => {
+        this.mapId = id;
+        this.savePrefs();
+        this.rebuildRules();
         this.restart();
       },
       restart: () => this.restart(),
@@ -109,6 +122,7 @@ export class Game {
     this.rebuildRules();
     this.restart();
     this.bindInput();
+    $('btn-course-restart').addEventListener('click', () => this.restart());
     window.addEventListener('resize', () => this.resize());
     this.resize();
     requestAnimationFrame(this.loop);
@@ -125,13 +139,19 @@ export class Game {
     this.motion.finish();
     this.pads.buildFunc(this.cockpit().pad);
     this.refresh();
+    // 開局時第一個檢查點就是目標：它的 ACTIVATE 鉤子在這裡發（之後的由引擎隨事件發出）
+    if (this.map.course) for (const h of hooksOf(this.map.course, 0, 'ACTIVATE')) this.runHook(h);
   }
 
   private rebuildRules(): void {
     this.rules = withPatch(RULES, this.patch);
-    const raw = rawMapById(this.opts.mapId) ?? rawMapById('proving_ground')!;
+    const raw = rawMapById(this.mapId) ?? rawMapById('proving_ground')!;
     this.map = loadMap(this.rules, raw);
     this.bounds = mapBounds(this.map);
+  }
+
+  private savePrefs(): void {
+    savePrefs({ map: this.mapId, chassis: this.chassis });
   }
 
   /** 換一份規則但保留當下的局面 —— 調完參數可以接著開，不必回到出生點。 */
@@ -238,10 +258,39 @@ export class Game {
           if (e.reason === 'AP_SPENT') this.hud.toast('AP 用完，推進回合', 'info');
           if (e.reason === 'OVERDRAFT') this.hud.toast(`透支：行動已結算，推進回合（下回合 AP −${this.me().debt}）`, 'warn');
           break;
+        case 'CHECKPOINT': {
+          const total = this.map.course?.checkpoints.length ?? 0;
+          if (e.index + 1 < total) this.hud.toast(`✓ 檢查點 ${e.index + 1}／${total}（第 ${e.round} 回合）`, 'info');
+          break;
+        }
+        case 'COURSE_HOOK':
+          this.runHook(e.hook);
+          break;
+        case 'COURSE_DONE': {
+          const best = bestOf(this.mapId, this.chassis);
+          const record = recordFinish(this.mapId, this.chassis, e.round);
+          this.hud.toast(record && best !== null
+            ? `🏁 完賽：${e.round} 回合 —— 新紀錄（原本 ${best}）`
+            : `🏁 完賽：${e.round} 回合`, 'info');
+          break;
+        }
         default:
           break;
       }
     }
+  }
+
+  /**
+   * 檢查點的事件鉤子。core 只負責在對的時機發出來，內容由訂閱的系統解讀 ——
+   * 介面目前只認得 MESSAGE（跳一段旁白）。其他 type 先記在主控台，之後的新手教學、
+   * 生敵、開放按鍵之類的系統接上來時，就在這裡（或各自的訂閱處）加分支。
+   */
+  private runHook(hook: CourseHook): void {
+    if (hook.type === 'MESSAGE' && typeof hook.text === 'string') {
+      this.hud.toast(hook.text, 'story', 4000);
+      return;
+    }
+    console.info('[mech] 還沒有系統處理這種檢查點鉤子：', hook);
   }
 
   // ---------------------------------------------------------------- 畫面資料
@@ -252,12 +301,12 @@ export class Game {
 
   private isDeclare(): boolean {
     const u = activeUnit(this.state);
-    return !!u && u.side === 'PLAYER' && currentStep(this.state)?.kind === 'DECLARE';
+    return !this.state.over && !!u && u.side === 'PLAYER' && currentStep(this.state)?.kind === 'DECLARE';
   }
 
   private isAct(): boolean {
     const u = activeUnit(this.state);
-    return !!u && u.side === 'PLAYER' && currentStep(this.state)?.kind === 'ACT';
+    return !this.state.over && !!u && u.side === 'PLAYER' && currentStep(this.state)?.kind === 'ACT';
   }
 
   /** 左盤目前的選擇會發生什麼。 */
@@ -323,6 +372,26 @@ export class Game {
       readouts: cp.readouts,
     });
     $('btn-recenter').classList.toggle('hidden', this.pan.x === 0 && this.pan.y === 0);
+    this.refreshCourse();
+  }
+
+  /** 跑道那一行：下一個檢查點與這一步的提示；跑完就顯示成績。 */
+  private refreshCourse(): void {
+    const bar = $('hud-course');
+    const course = this.map.course;
+    const p = this.state.course;
+    bar.classList.toggle('hidden', !course);
+    if (!course || !p) return;
+    const best = bestOf(this.mapId, this.chassis);
+    bar.classList.toggle('done', p.done !== null);
+    if (p.done !== null) {
+      $('course-step').textContent = `🏁 完賽 ${p.done} 回合`;
+      $('course-hint').textContent = `${this.rules.chassis[this.chassis].name}${best !== null ? `・最佳 ${best} 回合` : ''}。按「重跑」再來一次，或在 ⚙ 換機體比較。`;
+      return;
+    }
+    const cp = course.checkpoints[p.next];
+    $('course-step').textContent = `${p.next + 1}／${course.checkpoints.length} ${cp.type === 'STOP' ? '停車' : '通過'}`;
+    $('course-hint').textContent = cp.hint + (best !== null && p.next === 0 ? `（最佳 ${best} 回合）` : '');
   }
 
   /** 中間確認鍵上寫這回合會變成什麼：「3速 → 轉60° −1 +2 → 4速↖」。 */
@@ -512,9 +581,12 @@ export class Game {
         // 行動階段：從目前位置開始，看下回合不加速會滑到哪
         drift = this.drift({ pos: u.pos, heading: u.heading, speed: u.speed } as MotionResult);
       }
+      const course = this.map.course && this.state.course
+        ? { checkpoints: this.map.course.checkpoints, next: this.state.course.next, start: this.map.playerSpawn.hex }
+        : null;
       draw(this.ctx, {
-        state: this.state, cam: this.cam, viewW: this.viewW, viewH: this.viewH, now,
-        motion: this.motion, preview, hint, drift, trail: this.trail, picked: this.picked,
+        state: this.state, cam: this.cam, viewW: this.viewW, viewH: this.viewH, safe: this.safe, now,
+        motion: this.motion, preview, hint, drift, trail: this.trail, picked: this.picked, course,
       });
     }
     requestAnimationFrame(this.loop);

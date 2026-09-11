@@ -9,6 +9,7 @@ import { RAW_MAPS } from '../core/content';
 import { driveProfile } from '../core/movement';
 import type { DriveProfile } from '../core/movement';
 import type { Rules, RulesPatch } from '../core/rules';
+import { pilotChassis } from '../core/rules';
 import { BUILD_ID } from './build';
 import { $, h } from './dom';
 
@@ -45,7 +46,7 @@ export interface TuningHost {
   restart(): void;
 }
 
-type Section = 'drives' | 'chassis';
+type Section = 'drives' | 'chassis' | 'weapons' | 'fireControls';
 
 interface Field {
   section: Section;
@@ -152,7 +153,7 @@ export class TuningPanel {
     body.append(maps);
 
     const pick = h('div', 'tune-chassis');
-    for (const ch of Object.values(rules.chassis)) {
+    for (const ch of pilotChassis(rules)) {
       const b = h('button', ch.id === chassisId ? 'on' : '', ch.name);
       b.type = 'button';
       b.addEventListener('click', () => {
@@ -192,6 +193,31 @@ export class TuningPanel {
     ] as Field[]) box.append(this.stepper(rules, field));
     body.append(box);
 
+    // 射擊：命中率的基礎是火控 × 武器類別的適性（不是武器本身）
+    const w = c.weapon ? rules.weapons[c.weapon] : null;
+    const fc = c.fireControl ? rules.fireControls[c.fireControl] : null;
+    if (w && fc) {
+      const wbox = h('section', 'tune-box');
+      wbox.append(h('h3', '', `射擊：${w.name} × ${fc.name}`));
+      const fw = (path: string[], label: string, min = 0): Field => ({ section: 'weapons', id: w.id, path, label, step: 1, min });
+      const ff = (path: string[], label: string, step = 1): Field => ({ section: 'fireControls', id: fc.id, path, label, step, min: 0 });
+      for (const field of [
+        ff(['aptitude', w.category], `火控適性（${w.category}）`, 5),
+        fw(['optimal', 'min'], '有利射程：近'),
+        fw(['optimal', 'max'], '有利射程：遠'),
+        { ...fw(['optimal', 'bonus'], '有利射程加成'), step: 5 },
+        ff(['tracking'], '追蹤（每 1 相對速度扣）'),
+        fw(['weight'], '重量（每 1 自身速度扣）'),
+        fw(['range'], '射程', 1),
+        fw(['damage'], '傷害'),
+        fw(['magazine'], '彈匣', 1),
+      ]) wbox.append(this.stepper(rules, field));
+      wbox.append(h('p', 'tune-profile',
+        `停著打有利射程內的固定靶 ${Math.min(rules.combat.maxHit, fc.aptitude[w.category] + w.optimal.bonus)}%`
+        + ` · 自己 3 速、靶靜止 ${Math.max(rules.combat.minHit, Math.min(rules.combat.maxHit, fc.aptitude[w.category] + w.optimal.bonus - 3 * fc.tracking - 3 * w.weight))}%`));
+      body.append(wbox);
+    }
+
     const patch = this.host.patch();
     const json = JSON.stringify(patch, null, 1);
     const out = h('section', 'tune-box');
@@ -227,8 +253,9 @@ export class TuningPanel {
       '操作：左盤跟著機首排（上面那顆永遠是「前」）。往一個方向點幾下就加速幾，再按中間的確認；什麼都不點直接確認 = 不加速。'
       + '點另一個方向 = 改選；同一方向點超過上限 = 歸零。地圖上機體周圍的數字是每個方向能點幾下。'
       + '確認後機體移動，換右盤行動；AP 用完或按「待機」就推進回合。'
+      + '射擊：自動選命中率最高的目標；點地圖上的目標 = 改選（這一回合有效）並列出命中明細。亮的扇形是射界 × 射程，較亮那圈是有利射程。'
       + '點地圖看地形與距離，拖曳平移，◎ 回中。'
-      + '桌機：W 前、E 右前、D 右後、S 後、A 左後、Q 左前、空白 確認；← → 轉向、C 散熱、V 切換、Enter 待機。'));
+      + '桌機：W 前、E 右前、D 右後、S 後、A 左後、Q 左前、空白 確認；← → 轉向、F 射擊、R 裝填、Tab 換目標、C 散熱、V 切換、Enter 待機。'));
 
     this.root.replaceChildren(body);
   }

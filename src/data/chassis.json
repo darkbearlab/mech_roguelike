@@ -1,8 +1,9 @@
 {
   "_comment": "機體。drives 是陣列：第一個是出擊時的驅動模式；兩個以上就能用「切換驅動模式」在兩種性能之間切換。",
   "_cockpit": "座艙 id，對應 ui.json 的 cockpits —— 功能盤佈局與資訊層是介面的事，core/ 只把它當成一個不透明的字串傳過去。",
-  "_testbed": "手感測試用的四台試驗機：配額、散熱全部相同，差異只在驅動。",
-  "_mass": "初版的質量欄位（accel = thrust / mass）隨連續物理一起作廢，移動性能直接寫在 drives.json。",
+  "_testbed": "手感測試用的四台試驗機：配額、散熱、武器全部相同，差異只在驅動。",
+  "_weapon": "weapon 是 weapons.json 的 id（目前一台一把）；null = 沒有武器。fireControl 是 fireControls.json 的 id —— 命中率的基礎是火控對這把武器類別的適性。有武器就一定要有火控。",
+  "_role": "role：PILOT = 玩家可以選來開的機體（預設）；TARGET = 靶，只會出現在地圖上。",
 
   "tk1": {
     "name": "TK-1 陸龜",
@@ -11,6 +12,9 @@
     "heatCap": 100,
     "heatPassive": 3,
     "sensorRange": 10,
+    "hp": 100,
+    "weapon": "rifle",
+    "fireControl": "std",
     "cockpit": "std"
   },
   "wk1": {
@@ -20,6 +24,9 @@
     "heatCap": 100,
     "heatPassive": 3,
     "sensorRange": 10,
+    "hp": 100,
+    "weapon": "rifle",
+    "fireControl": "std",
     "cockpit": "std"
   },
   "jt1": {
@@ -29,6 +36,9 @@
     "heatCap": 100,
     "heatPassive": 3,
     "sensorRange": 10,
+    "hp": 100,
+    "weapon": "rifle",
+    "fireControl": "std",
     "cockpit": "std"
   },
   "hy1": {
@@ -38,6 +48,36 @@
     "heatCap": 100,
     "heatPassive": 3,
     "sensorRange": 10,
+    "hp": 100,
+    "weapon": "rifle",
+    "fireControl": "std",
+    "cockpit": "std"
+  },
+
+  "target": {
+    "name": "固定靶",
+    "role": "TARGET",
+    "drives": ["static"],
+    "apQuota": 0,
+    "heatCap": 100,
+    "heatPassive": 0,
+    "sensorRange": 0,
+    "hp": 20,
+    "weapon": null,
+    "fireControl": null,
+    "cockpit": "std"
+  },
+  "drone": {
+    "name": "靶機",
+    "role": "TARGET",
+    "drives": ["drone"],
+    "apQuota": 0,
+    "heatCap": 100,
+    "heatPassive": 0,
+    "sensorRange": 0,
+    "hp": 20,
+    "weapon": null,
+    "fireControl": null,
     "cockpit": "std"
   }
 }

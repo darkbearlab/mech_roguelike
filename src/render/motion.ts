@@ -1,6 +1,7 @@
 /**
  * 位移與轉向的演出。**純呈現**：規則層早就把位置算完了，這裡只是讓畫面慢一點追上去。
  * 任何一個時長設為 0，畫面立即等於最終狀態（ui.json 的原則）。
+ * 開始時間可以在未來（排在別的演出之後）：輪到之前停在起點。
  *
  * 位移沿速度方向筆直走，起點到終點的直線剛好穿過沿途每一格的中心 ——
  * 所以動畫就是「一格一格走過去」。
@@ -60,7 +61,8 @@ export class Motion {
   posOf(id: string, fallback: AxialPt, now: number): AxialPt {
     const m = this.moves.get(id);
     if (!m) return fallback;
-    const t = Math.min(1, (now - m.start) / m.dur);
+    // 還沒輪到它（排在曳光之後）：停在起點
+    const t = Math.max(0, Math.min(1, (now - m.start) / m.dur));
     if (t >= 1) {
       this.moves.delete(id);
       return fallback;
@@ -81,7 +83,7 @@ export class Motion {
   angleOf(id: string, fallback: number, now: number): number {
     const tw = this.turns.get(id);
     if (!tw) return fallback;
-    const t = Math.min(1, (now - tw.start) / tw.dur);
+    const t = Math.max(0, Math.min(1, (now - tw.start) / tw.dur));
     if (t >= 1) {
       this.turns.delete(id);
       return fallback;

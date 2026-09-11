@@ -1,19 +1,18 @@
 {
-  "_comment": "行動。ap = 行動點成本、heat = 產熱（負值 = 散熱）。requires 是前置條件的代號，由 core/engine.ts 解讀。",
+  "_comment": "行動。ap = 行動點成本、heat = 產熱（負值 = 散熱）。requires 是前置條件的代號，由 core/engine.ts 解讀。射擊與裝填的成本跟著武器走（weapons.json）。",
 
   "economy": {
     "_apDebtCap": "透支上限。手上還有 AP 時可以做比它貴的行動：行動照常結算，然後這個階段結束，不夠的部分記成債務，直接從下一個階段的配額扣（扣不完的繼續帶著）。AP 用完（歸零）也會自動結束階段。債務 > 0 時不能被動散熱。",
     "apDebtCap": 2,
     "_overheatShutdownPhases": "熱量達上限時要停機幾個自己的階段。在自己的階段中過熱時，剩下的行動當場取消，再加上接下來的整個階段。",
-    "overheatShutdownPhases": 1
+    "overheatShutdownPhases": 1,
+    "_heatWarnAbove": "熱量警戒線（佔上限的比例）：超過就在儀表上變色，bot 會想散熱。目前不影響命中 —— 設計者給的命中因素裡沒有熱。",
+    "heatWarnAbove": 0.7
   },
 
   "actions": {
     "wait":        { "name": "待機",   "ap": 0, "heat": 0 },
     "lock":        { "name": "鎖定",   "ap": 1, "heat": 2,   "requires": ["WEAPON"] },
-    "fireLight":   { "name": "射擊",   "ap": 1, "heat": 6,   "requires": ["WEAPON"] },
-    "fireHeavy":   { "name": "重射擊", "ap": 3, "heat": 20,  "requires": ["WEAPON"] },
-    "reload":      { "name": "裝填",   "ap": 2, "heat": 2,   "requires": ["WEAPON"] },
     "swap":        { "name": "換武器", "ap": 2, "heat": 0,   "requires": ["WEAPON"] },
     "cool":        { "name": "散熱",   "ap": 1, "heat": -25 },
     "switchDrive": { "name": "切換驅動", "ap": 1, "heat": 5, "requires": ["MULTI_DRIVE"] },

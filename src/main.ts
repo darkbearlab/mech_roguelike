@@ -7,8 +7,8 @@ import { loadPrefs } from './ui/prefs';
 
 /**
  * 網址參數（優先於上次的選擇）：
- *   ?seed=123        固定亂數種子（目前還沒有東西會抽亂數，先把管線接好）
- *   ?map=track_01    指定地圖（track_01 基礎跑道 / proving_ground 試驗場）
+ *   ?seed=123        固定亂數種子（命中擲骰用）
+ *   ?map=track_01    指定地圖（track_01 基礎跑道 / range_01 射擊場 / proving_ground 試驗場）
  *   ?chassis=jt1     指定機體（tk1 履帶 / wk1 步行 / jt1 噴射 / hy1 步行＋噴射）
  */
 const params = new URLSearchParams(location.search);
@@ -29,7 +29,8 @@ function readMap(): string {
 /** 機體：網址 → 上次選的 → 跑道建議的 → 步行。 */
 function readChassis(mapId: string): string {
   for (const id of [params.get('chassis'), prefs.chassis, rawMapById(mapId)?.course?.chassis]) {
-    if (id && RULES.chassis[id]) return id;
+    // 靶（role TARGET）不能開
+    if (id && RULES.chassis[id]?.role === 'PILOT') return id;
   }
   return 'wk1';
 }

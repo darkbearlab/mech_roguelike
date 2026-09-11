@@ -43,6 +43,28 @@ export interface Unit {
   /** 已宣告、尚未解算的加速（循序制下只會存在一瞬間）。 */
   pendingAccel: AccelOrder | null;
   alive: boolean;
+  hp: number;
+  /** 彈匣裡還有幾發（沒有武器就是 0）。 */
+  ammo: number;
+  /** INPUT = 等指令（玩家、測試裡手動操作的敵人）；SCRIPT = 引擎照腳本自動走完它的階段（靶）。 */
+  control: 'INPUT' | 'SCRIPT';
+  script: Script | null;
+}
+
+/**
+ * 自動單位的腳本（目前只給靶用；之後的敵人 AI 也從這裡接）。
+ * - IDLE：不動
+ * - PATROL：依序往每個巡邏點開，到了（1 格內）就換下一個，繞圈
+ */
+export type Script =
+  | { kind: 'IDLE' }
+  | { kind: 'PATROL'; points: Hex[]; next: number };
+
+/** 玩家這一局的射擊紀錄。 */
+export interface Stats {
+  shots: number;
+  hits: number;
+  kills: number;
 }
 
 /**
@@ -83,6 +105,7 @@ export interface GameState {
   rng: RngState;
   /** 跑道進度（地圖有跑道時才有）。 */
   course: CourseProgress | null;
+  stats: Stats;
   /** 勝敗判定：跑完跑道、或（之後）一方全滅。 */
   over: null | { winner: Side | 'DRAW' };
 }
@@ -90,6 +113,8 @@ export interface GameState {
 export type Command =
   | { type: 'ACCEL'; order: AccelOrder }
   | { type: 'TURN'; delta: 1 | -1 }
+  | { type: 'FIRE'; targetId: string }
+  | { type: 'RELOAD' }
   | { type: 'COOL' }
   | { type: 'SWITCH_DRIVE' }
   | { type: 'WAIT' };
@@ -127,6 +152,11 @@ export type GameEvent =
   | { type: 'OVERHEAT'; unitId: string }
   | { type: 'REBOOT'; unitId: string }
   | { type: 'WAITED'; unitId: string }
+  /** from / to = 開火當下兩者的位置（同一批事件裡目標之後可能還會移動；演出要畫在開火的那一刻）。 */
+  | { type: 'FIRED'; shooterId: string; targetId: string; hit: boolean; chance: number; damage: number; from: Hex; to: Hex }
+  | { type: 'DESTROYED'; unitId: string; by: string }
+  | { type: 'RELOADED'; unitId: string; ammo: number }
+  | { type: 'SPAWNED'; unitId: string }
   /** 通過跑道的第 index 個檢查點（0 起算）。 */
   | { type: 'CHECKPOINT'; index: number; id: string; round: number }
   /** 檢查點的事件鉤子觸發了。core 不解讀 hook 的內容，由訂閱的系統處理。 */

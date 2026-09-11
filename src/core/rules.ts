@@ -9,6 +9,8 @@
  */
 import drivesJson from '../data/drives.json';
 import chassisJson from '../data/chassis.json';
+import weaponsJson from '../data/weapons.json';
+import fireControlsJson from '../data/fireControls.json';
 import actionsJson from '../data/actions.json';
 import terrainJson from '../data/terrain.json';
 import combatJson from '../data/combat.json';
@@ -44,25 +46,68 @@ export interface DriveDef {
 export interface ChassisDef {
   id: string;
   name: string;
+  /** PILOT = 玩家可以選來開的機體；TARGET = 靶，只會出現在地圖上。 */
+  role: 'PILOT' | 'TARGET';
   /** 第一個是出擊時的驅動模式。 */
   drives: string[];
   apQuota: number;
   heatCap: number;
   heatPassive: number;
   sensorRange: number;
+  hp: number;
+  /** weapons.json 的 id；null = 沒有武器。 */
+  weapon: string | null;
+  /** fireControls.json 的 id；有武器就一定要有。 */
+  fireControl: string | null;
   /** ui.json 的座艙 id。core/ 不解讀。 */
   cockpit: string;
 }
 
-export type ActionId =
-  | 'wait' | 'lock' | 'fireLight' | 'fireHeavy' | 'reload' | 'swap'
-  | 'cool' | 'switchDrive' | 'turn';
+/** 一次行動的成本。 */
+export interface Cost {
+  ap: number;
+  heat: number;
+}
 
-export const ACTION_IDS: readonly ActionId[] = [
-  'wait', 'lock', 'fireLight', 'fireHeavy', 'reload', 'swap', 'cool', 'switchDrive', 'turn',
-];
+/**
+ * 火控系統。命中率的基礎是「火控 × 武器類別」的適性，不是武器本身的命中
+ * （設計者：聽起來荒謬，但比較好平衡 —— 只要看一張表）。
+ */
+export interface FireControlDef {
+  id: string;
+  name: string;
+  /** 相對速度每 1 格/回合扣幾點（算提前量是火控的工作）。 */
+  tracking: number;
+  /** 以武器 category 為鍵的適性（點數，75 = 75%）。 */
+  aptitude: Record<string, number>;
+}
 
-/** 前置條件代號。WEAPON = 需要武器（第 5 步）；MULTI_DRIVE = 機體有兩種以上驅動。 */
+export interface WeaponDef {
+  id: string;
+  name: string;
+  /** 武器類別：火控的適性以它為鍵。 */
+  category: string;
+  /** 射程（格）。 */
+  range: number;
+  /** 有利射程 [min, max]（含兩端）與在這個距離內的命中加成。 */
+  optimal: { min: number; max: number; bonus: number };
+  /** 射界總角度，以機首為中心。180 = 前方半平面。 */
+  arcDegrees: number;
+  /** 依偏離機首的角度扣的命中點數，每 30° 一格；超出表格的角度用最後一格。 */
+  arcPenalty: number[];
+  /** 重量：自己的速度每 1 格/回合扣幾點（越重的武器高速時越不準）。 */
+  weight: number;
+  damage: number;
+  magazine: number;
+  fire: Cost;
+  reload: Cost;
+}
+
+export type ActionId = 'wait' | 'lock' | 'swap' | 'cool' | 'switchDrive' | 'turn';
+
+export const ACTION_IDS: readonly ActionId[] = ['wait', 'lock', 'swap', 'cool', 'switchDrive', 'turn'];
+
+/** 前置條件代號。WEAPON = 需要武器；MULTI_DRIVE = 機體有兩種以上驅動。 */
 export type Requirement = 'WEAPON' | 'MULTI_DRIVE';
 
 export interface ActionDef {
@@ -76,6 +121,8 @@ export interface ActionDef {
 export interface EconomyDef {
   apDebtCap: number;
   overheatShutdownPhases: number;
+  /** 熱量警戒線（佔上限的比例）。目前只影響儀表顏色與 bot 的散熱判斷。 */
+  heatWarnAbove: number;
 }
 
 /** 地形。目前只有外觀與日後視線用的資料 —— 地形不影響移動（先無視地形限制，之後再討論）。 */
@@ -88,19 +135,16 @@ export interface TerrainDef {
 }
 
 export interface CombatDef {
-  baseHit: number;
-  k1: number;
-  k2: number;
-  stableBonus: number;
-  heatPenalty: number;
-  heatPenaltyAbove: number;
-  debtPenalty: number;
-  rangeFalloff: unknown;
+  /** 命中率的下限與上限（點數）。 */
+  minHit: number;
+  maxHit: number;
 }
 
 export interface Rules {
   drives: Record<string, DriveDef>;
   chassis: Record<string, ChassisDef>;
+  weapons: Record<string, WeaponDef>;
+  fireControls: Record<string, FireControlDef>;
   actions: Record<ActionId, ActionDef>;
   economy: EconomyDef;
   terrain: Record<string, TerrainDef>;
@@ -111,6 +155,8 @@ export interface Rules {
 export interface RawRules {
   drives: Record<string, unknown>;
   chassis: Record<string, unknown>;
+  weapons: Record<string, unknown>;
+  fireControls: Record<string, unknown>;
   actions: { economy: unknown; actions: Record<string, unknown> };
   terrain: Record<string, unknown>;
   combat: Record<string, unknown>;
@@ -119,6 +165,8 @@ export interface RawRules {
 export const RAW_RULES: RawRules = {
   drives: drivesJson,
   chassis: chassisJson,
+  weapons: weaponsJson,
+  fireControls: fireControlsJson,
   actions: actionsJson,
   terrain: terrainJson,
   combat: combatJson,
@@ -173,13 +221,60 @@ export function loadRules(raw: RawRules): Rules {
     drives[id] = d;
   }
 
+  const weapons: Record<string, WeaponDef> = {};
+  for (const [id, o] of entries(raw.weapons)) {
+    const w = strip<WeaponDef>(o, id);
+    int(`weapons.${id}.range`, w.range, 1);
+    num(`weapons.${id}.arcDegrees`, w.arcDegrees, 0);
+    if (typeof w.arcDegrees === 'number' && w.arcDegrees > 360) errors.push(`weapons.${id}.arcDegrees 不能超過 360`);
+    if (!Array.isArray(w.arcPenalty) || w.arcPenalty.length === 0) errors.push(`weapons.${id}.arcPenalty 至少要有一格`);
+    else w.arcPenalty.forEach((p, i) => num(`weapons.${id}.arcPenalty[${i}]`, p));
+    if (typeof w.category !== 'string' || !w.category) errors.push(`weapons.${id}.category 必須是非空字串`);
+    int(`weapons.${id}.optimal.min`, w.optimal?.min, 0);
+    int(`weapons.${id}.optimal.max`, w.optimal?.max, 0);
+    num(`weapons.${id}.optimal.bonus`, w.optimal?.bonus);
+    if (w.optimal && (w.optimal.min > w.optimal.max || w.optimal.max > w.range)) {
+      errors.push(`weapons.${id}.optimal 必須是 min ≤ max ≤ range（現在是 ${w.optimal.min}–${w.optimal.max}，射程 ${w.range}）`);
+    }
+    num(`weapons.${id}.weight`, w.weight, 0);
+    num(`weapons.${id}.damage`, w.damage, 0);
+    int(`weapons.${id}.magazine`, w.magazine, 1);
+    for (const k of ['fire', 'reload'] as const) {
+      int(`weapons.${id}.${k}.ap`, w[k]?.ap, 0);
+      num(`weapons.${id}.${k}.heat`, w[k]?.heat);
+    }
+    weapons[id] = w;
+  }
+
+  const fireControls: Record<string, FireControlDef> = {};
+  for (const [id, o] of entries(raw.fireControls)) {
+    const f = strip<FireControlDef>(o, id);
+    num(`fireControls.${id}.tracking`, f.tracking, 0);
+    if (!isPlain(f.aptitude)) errors.push(`fireControls.${id}.aptitude 必須是 { 武器類別: 點數 }`);
+    else for (const [cat, v] of Object.entries(f.aptitude)) num(`fireControls.${id}.aptitude.${cat}`, v);
+    fireControls[id] = f;
+  }
+
   const chassis: Record<string, ChassisDef> = {};
   for (const [id, o] of entries(raw.chassis)) {
     const c = strip<ChassisDef>(o, id);
+    c.role = c.role ?? 'PILOT';
+    if (c.role !== 'PILOT' && c.role !== 'TARGET') errors.push(`chassis.${id}.role 必須是 PILOT 或 TARGET`);
     int(`chassis.${id}.apQuota`, c.apQuota, 0);
     num(`chassis.${id}.heatCap`, c.heatCap, 1);
     num(`chassis.${id}.heatPassive`, c.heatPassive, 0);
     num(`chassis.${id}.sensorRange`, c.sensorRange, 0);
+    num(`chassis.${id}.hp`, c.hp, 1);
+    c.weapon = c.weapon ?? null;
+    c.fireControl = c.fireControl ?? null;
+    const w = c.weapon === null ? null : weapons[c.weapon];
+    const fc = c.fireControl === null ? null : fireControls[c.fireControl];
+    if (w === undefined) errors.push(`chassis.${id}.weapon 指向不存在的武器 "${c.weapon}"`);
+    if (fc === undefined) errors.push(`chassis.${id}.fireControl 指向不存在的火控 "${c.fireControl}"`);
+    if (w && fc === null) errors.push(`chassis.${id} 有武器就要有火控（fireControl）`);
+    if (w && fc && isPlain(fc.aptitude) && typeof fc.aptitude[w.category] !== 'number') {
+      errors.push(`chassis.${id}：火控 "${fc.id}" 沒有 ${w.name}（${w.category}）的適性`);
+    }
     if (!Array.isArray(c.drives) || c.drives.length === 0) {
       errors.push(`chassis.${id}.drives 至少要有一種驅動`);
     } else {
@@ -208,6 +303,7 @@ export function loadRules(raw: RawRules): Rules {
   const economy = strip<EconomyDef>(raw.actions.economy as Record<string, unknown>, 'economy');
   int('economy.apDebtCap', economy.apDebtCap, 0);
   int('economy.overheatShutdownPhases', economy.overheatShutdownPhases, 1);
+  num('economy.heatWarnAbove', economy.heatWarnAbove, 0);
   delete (economy as unknown as Record<string, unknown>).id;
 
   const terrain: Record<string, TerrainDef> = {};
@@ -226,14 +322,21 @@ export function loadRules(raw: RawRules): Rules {
   }
 
   const combat = strip<CombatDef>(raw.combat, 'combat');
+  num('combat.minHit', combat.minHit, 0);
+  num('combat.maxHit', combat.maxHit, 0);
   delete (combat as unknown as Record<string, unknown>).id;
 
   if (errors.length) throw new Error('規則資料有誤：\n  ' + errors.join('\n  '));
-  return { drives, chassis, actions, economy, terrain, combat };
+  return { drives, chassis, weapons, fireControls, actions, economy, terrain, combat };
 }
 
 /** data/*.json 讀進來的預設規則。 */
 export const RULES: Rules = loadRules(RAW_RULES);
+
+/** 玩家可以選來開的機體（靶不算）。 */
+export function pilotChassis(rules: Rules): ChassisDef[] {
+  return Object.values(rules.chassis).filter((c) => c.role === 'PILOT');
+}
 
 // ---------------------------------------------------------------- 覆寫
 
@@ -243,6 +346,8 @@ type DeepPartial<T> = { [K in keyof T]?: T[K] extends object ? DeepPartial<T[K]>
 export type RulesPatch = {
   drives?: Record<string, DeepPartial<Omit<DriveDef, 'id'>>>;
   chassis?: Record<string, DeepPartial<Omit<ChassisDef, 'id'>>>;
+  weapons?: Record<string, DeepPartial<Omit<WeaponDef, 'id'>>>;
+  fireControls?: Record<string, DeepPartial<Omit<FireControlDef, 'id'>>>;
   terrain?: Record<string, DeepPartial<Omit<TerrainDef, 'id'>>>;
   economy?: Partial<EconomyDef>;
 };
@@ -270,6 +375,8 @@ export function withPatch(base: Rules, patch: RulesPatch): Rules {
   };
   merge(next.drives, patch.drives);
   merge(next.chassis, patch.chassis);
+  merge(next.weapons, patch.weapons);
+  merge(next.fireControls, patch.fireControls);
   merge(next.terrain, patch.terrain);
   if (patch.economy) Object.assign(next.economy, patch.economy);
   return next;

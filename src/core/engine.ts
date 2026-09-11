@@ -14,17 +14,21 @@
  *   - AP 用完（歸零）
  *   - 透支：行動照常結算，然後結束，不夠的部分從下一個階段的配額扣
  *   - 過熱停機
+ *
+ * 自動單位（control = SCRIPT，目前是靶）的階段由引擎照腳本直接走完，不等指令。
  */
+import { shotCheck, weaponOf } from './combat';
 import { advanceCourse, hooksOf, newProgress } from './course';
-import type { HookWhen } from './course';
+import type { CourseHook, HookWhen } from './course';
 import type { Dir, Hex } from './hex';
 import { rotate } from './hex';
-import type { GameMap } from './map';
+import type { GameMap, UnitSpawn } from './map';
 import { addHeat, checkAp, passiveCool, payQuota, spendAp } from './economy';
 import { accelHeat, accelLegality, driveOf, resolveMotion, worldOf } from './movement';
 import { ORDERS } from './order';
-import { createRng } from './rng';
+import { createRng, nextFloat } from './rng';
 import type { Rules } from './rules';
+import { scriptAccel, scriptFacing } from './script';
 import type { AccelOrder, Command, GameEvent, GameState, Side, Step, Unit } from './state';
 import { activeUnit, currentStep, unitById } from './state';
 
@@ -66,7 +70,23 @@ export function makeUnit(rules: Rules, id: string, side: Side, spec: UnitSetup, 
     facesTurned: 0,
     pendingAccel: null,
     alive: true,
+    hp: c.hp,
+    ammo: c.weapon ? rules.weapons[c.weapon].magazine : 0,
+    control: 'INPUT',
+    script: null,
   };
+}
+
+/** 放一個自動單位（靶）上場：地圖開局的 units，或 SPAWN 鉤子。id 重複就自動加編號。 */
+function addScripted(s: GameState, sp: UnitSpawn): Unit {
+  const base = sp.id ?? sp.chassis;
+  let id = base;
+  for (let n = 2; s.units.some((u) => u.id === id); n++) id = `${base}${n}`;
+  const u = makeUnit(s.rules, id, 'ENEMY', { chassis: sp.chassis }, sp.hex, sp.facing);
+  u.control = 'SCRIPT';
+  u.script = structuredClone(sp.script);
+  s.units.push(u);
+  return u;
 }
 
 /** 開一局。回傳時已經停在第 1 回合玩家的加速宣告。 */
@@ -94,10 +114,26 @@ export function newGame(rules: Rules, map: GameMap, setup: Setup): GameState {
     cursor: -1,
     rng: createRng(setup.seed),
     course: map.course ? newProgress() : null,
+    stats: { shots: 0, hits: 0, kills: 0 },
     over: null,
   };
+  for (const sp of map.units) addScripted(s, sp);
+  // 開局時第一個檢查點就是目標：它的 ACTIVATE 鉤子裡、會改變局面的（SPAWN）在這裡生效。
+  // 介面層的鉤子（MESSAGE 之類）由呼叫端自己用 hooksOf(course, 0, 'ACTIVATE') 取。
+  if (map.course) for (const h of hooksOf(map.course, 0, 'ACTIVATE')) applyHookEffect(s, h, []);
   proceed(s, []);
   return s;
+}
+
+/**
+ * core 自己會處理的鉤子：會改變局面的那幾種。其他 type 只轉發（COURSE_HOOK 事件），由訂閱的系統解讀。
+ * 目前只有 SPAWN（生出一個自動單位）；之後的「開放按鍵」「換規則」之類也加在這裡。
+ */
+function applyHookEffect(s: GameState, h: CourseHook, ev: GameEvent[]): void {
+  if (h.type === 'SPAWN' && h.spawn) {
+    const u = addScripted(s, h.spawn as UnitSpawn);
+    ev.push({ type: 'SPAWNED', unitId: u.id });
+  }
 }
 
 // ---------------------------------------------------------------- 合法性
@@ -151,6 +187,21 @@ export function checkLegal(s: GameState, cmd: Command): Legal {
       const p = turnPrice(rules, u);
       return priced(p.ap, p.heat);
     }
+    case 'FIRE': {
+      const w = weaponOf(rules, u);
+      const target = unitById(s, cmd.targetId);
+      if (!w) return no('沒有武器');
+      if (!target) return { ...no('沒有這個目標'), ap: w.fire.ap, heat: w.fire.heat };
+      const shot = shotCheck(s, u, target);
+      if (!shot.ok) return { ...no(shot.reason!), ap: w.fire.ap, heat: w.fire.heat };
+      return priced(w.fire.ap, w.fire.heat);
+    }
+    case 'RELOAD': {
+      const w = weaponOf(rules, u);
+      if (!w) return no('沒有武器');
+      if (u.ammo >= w.magazine) return { ...no('彈匣是滿的'), ap: w.reload.ap, heat: w.reload.heat };
+      return priced(w.reload.ap, w.reload.heat);
+    }
     case 'COOL': {
       const a = rules.actions.cool;
       const l = priced(a.ap, a.heat);
@@ -192,6 +243,42 @@ export function applyCommand(s: GameState, cmd: Command): { state: GameState; ev
       u.speed = Math.max(0, u.speed - driveOf(rules, u).facingTurnSpeedLoss);
       ev.push({ type: 'TURNED', unitId: u.id, from, to: u.facing, speed: u.speed });
       heat(n, u, p.heat, ev);
+      afterAction(n, u, legal, ev);
+      break;
+    }
+    case 'FIRE': {
+      const w = weaponOf(rules, u)!;
+      const target = unitById(n, cmd.targetId)!;
+      const { chance } = shotCheck(n, u, target);
+      spendAp(u, w.fire.ap);
+      u.ammo--;
+      // 擲骰走狀態裡的種子亂數：同一個種子、同一串指令，永遠同一個結果
+      const hit = nextFloat(n.rng) * 100 < chance;
+      const mine = u.side === 'PLAYER';
+      if (mine) n.stats.shots++;
+      ev.push({
+        type: 'FIRED', shooterId: u.id, targetId: target.id, hit, chance, damage: hit ? w.damage : 0,
+        from: { ...u.pos }, to: { ...target.pos },
+      });
+      if (hit) {
+        if (mine) n.stats.hits++;
+        target.hp = Math.max(0, target.hp - w.damage);
+        if (target.hp === 0) {
+          target.alive = false;
+          if (mine) n.stats.kills++;
+          ev.push({ type: 'DESTROYED', unitId: target.id, by: u.id });
+        }
+      }
+      heat(n, u, w.fire.heat, ev);
+      afterAction(n, u, legal, ev);
+      break;
+    }
+    case 'RELOAD': {
+      const w = weaponOf(rules, u)!;
+      spendAp(u, w.reload.ap);
+      u.ammo = w.magazine;
+      ev.push({ type: 'RELOADED', unitId: u.id, ammo: u.ammo });
+      heat(n, u, w.reload.heat, ev);
       afterAction(n, u, legal, ev);
       break;
     }
@@ -260,6 +347,11 @@ function arrive(s: GameState, step: Step, ev: GameEvent[]): boolean {
         u.pendingAccel = null;
         return true;
       }
+      // 自動單位：照腳本宣告，不等輸入
+      if (u.control === 'SCRIPT') {
+        u.pendingAccel = scriptAccel(s, u);
+        return true;
+      }
       return false;
     }
     case 'MOVE':
@@ -275,6 +367,16 @@ function arrive(s: GameState, step: Step, ev: GameEvent[]): boolean {
       if (!u.alive) return true;
       if (u.shutdown > 0) {
         endPhase(u, 'SHUTDOWN', ev);
+        return true;
+      }
+      // 自動單位：巡邏的把機首轉向目標（靶機轉向免費），然後結束
+      if (u.control === 'SCRIPT') {
+        const to = scriptFacing(u);
+        if (to !== null) {
+          ev.push({ type: 'TURNED', unitId: u.id, from: u.facing, to, speed: u.speed });
+          u.facing = to;
+        }
+        endPhase(u, 'WAIT', ev);
         return true;
       }
       // 配額被債務吃光：AP 一開始就是 0，這個階段沒有事可做
@@ -325,6 +427,7 @@ function move(s: GameState, u: Unit, order: AccelOrder, ev: GameEvent[]): void {
     const hook = (index: number, when: HookWhen): void => {
       for (const h of hooksOf(course, index, when)) {
         ev.push({ type: 'COURSE_HOOK', index, checkpointId: course.checkpoints[index].id, hook: h, round: s.round });
+        applyHookEffect(s, h, ev);
       }
     };
     // 每個檢查點的 ACTIVATE 與 REACH 各發一次、依序發 —— 一次衝過好幾個也一樣
@@ -382,12 +485,13 @@ function world(s: GameState): void {
 
 /**
  * 勝敗判定。玩家陣亡 → 敵方勝；跑完跑道、或開局有敵人且全滅 → 玩家勝。
+ * 靶（role TARGET）不算敵人：打光射擊場的靶不會提早結束，終點才是終點。
  * 沒有跑道也沒有敵人（試驗場）是自由移動，永遠不結束。
  */
 export function judge(s: GameState): GameState['over'] {
   if (!s.units.some((u) => u.side === 'PLAYER' && u.alive)) return { winner: 'ENEMY' };
   if (s.course?.done != null) return { winner: 'PLAYER' };
-  const enemies = s.units.filter((u) => u.side === 'ENEMY');
+  const enemies = s.units.filter((u) => u.side === 'ENEMY' && s.rules.chassis[u.chassis].role !== 'TARGET');
   if (enemies.length > 0 && enemies.every((u) => !u.alive)) return { winner: 'PLAYER' };
   return null;
 }

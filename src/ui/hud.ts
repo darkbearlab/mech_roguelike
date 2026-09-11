@@ -22,9 +22,13 @@ export interface HudView {
   facing: Dir;
   heat: number;
   heatCap: number;
-  /** 熱量懲罰門檻（0..1）。 */
+  /** 熱量警戒線（0..1）。 */
   hotAbove: number;
   shutdown: boolean;
+  /** null = 沒有武器。 */
+  weaponName: string | null;
+  ammo: number;
+  magazine: number;
   ap: number;
   quota: number;
   debt: number;
@@ -70,7 +74,9 @@ export class Hud {
     const debt = '▮'.repeat(v.debt) + '▯'.repeat(Math.max(0, v.debtCap - v.debt));
     $('hud-ap').innerHTML = `<span class="ap-pips">AP ${pips.join('')}</span>`
       + `<span class="debt${v.debt > 0 ? ' on' : ''}">債 ${debt}</span>`;
-    $('hud-ammo').textContent = '彈 —';
+    const ammo = $('hud-ammo');
+    ammo.textContent = v.weaponName === null ? '彈 —' : `${v.weaponName} ${v.ammo}/${v.magazine}`;
+    ammo.classList.toggle('empty', v.weaponName !== null && v.ammo === 0);
 
     this.drawDial(v);
   }

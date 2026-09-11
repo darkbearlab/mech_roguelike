@@ -38,5 +38,27 @@
     "facingTurnSpeedLoss": 1,
     "turnRule": { "freeFacesPerTurn": "ANY" },
     "heatPerTap": 2
+  },
+
+  "_targets": "以下是靶用的驅動：固定靶動不了；靶機照巡邏腳本慢慢飛，不衰減、轉向免費，好讓它的速度是穩定的「相對位移差」教材。",
+  "static": {
+    "name": "固定",
+    "maxSpeed": 0,
+    "taps": { "front": 0, "frontSide": 0, "rearSide": 0, "rear": 0 },
+    "turnLoss": { "d60": 0, "d120": 0 },
+    "decay": 0,
+    "facingTurnSpeedLoss": 0,
+    "turnRule": { "freeFacesPerTurn": "ANY" },
+    "heatPerTap": 0
+  },
+  "drone": {
+    "name": "靶機",
+    "maxSpeed": 2,
+    "taps": { "front": 1, "frontSide": 1, "rearSide": 1, "rear": 1 },
+    "turnLoss": { "d60": 0, "d120": 0 },
+    "decay": 0,
+    "facingTurnSpeedLoss": 0,
+    "turnRule": { "freeFacesPerTurn": "ANY" },
+    "heatPerTap": 0
   }
 }

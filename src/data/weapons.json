@@ -1,0 +1,23 @@
+{
+  "_comment": "武器（設計者 2026-09-11：先一把基本步槍，右側武器面板之後再做）。數值全部暫定。",
+
+  "_hit": "命中率 = 火控適性（fireControls.json，以 category 查）+ 有利射程加成 − 追蹤 × 相對速度 − weight × 自己的速度 − 角度 − 掩體 − 電戰，夾在 combat.json 的 minHit..maxHit。武器本身沒有「基礎命中」。",
+  "_optimal": "optimal 是有利射程 [min, max] 格（含兩端）與在這個距離內的命中加成。max 不能超過 range。",
+  "_weight": "weight 是「越重的武器高速時越不準」：自己的速度每 1 格/回合扣幾點。",
+  "_arc": "arcDegrees 是射界總角度，以機首為中心（180 = 前方半平面）。arcPenalty 是依偏離機首的角度扣的點數，每 30° 一格：[0–30°, 30–60°, 60–90°, …]。設計者說將來角度會影響命中，現在先全 0。",
+  "_cost": "fire / reload 是射擊與裝填的 AP 與熱。",
+
+  "rifle": {
+    "name": "步槍",
+    "category": "rifle",
+    "range": 6,
+    "optimal": { "min": 2, "max": 4, "bonus": 10 },
+    "arcDegrees": 180,
+    "arcPenalty": [0, 0, 0],
+    "weight": 2,
+    "damage": 10,
+    "magazine": 6,
+    "fire": { "ap": 1, "heat": 6 },
+    "reload": { "ap": 2, "heat": 2 }
+  }
+}

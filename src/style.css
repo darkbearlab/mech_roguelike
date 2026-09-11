@@ -38,9 +38,12 @@ button {
   display: none !important;
 }
 
+/* 畫布永遠剛好鋪滿畫面：尺寸由 CSS 決定，程式只讀它實際的大小（不設行內寬高、不信 window.innerWidth） */
 #map {
   position: fixed;
   inset: 0;
+  width: 100%;
+  height: 100%;
   display: block;
   touch-action: none;
 }

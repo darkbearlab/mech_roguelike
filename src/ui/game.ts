@@ -83,6 +83,7 @@ export class Game {
   private ctx = this.canvas.getContext('2d')!;
   private viewW = 0;
   private viewH = 0;
+  private dpr = 0;
   private safe: SafeArea = { top: 0, bottom: 0 };
   private cam: Camera = { size: 24, ox: 0, oy: 0 };
 
@@ -139,6 +140,7 @@ export class Game {
     this.bindInput();
     $('btn-course-restart').addEventListener('click', () => this.restart());
     window.addEventListener('resize', () => this.resize());
+    window.visualViewport?.addEventListener('resize', () => this.resize());
     this.resize();
     requestAnimationFrame(this.loop);
   }
@@ -734,14 +736,23 @@ export class Game {
 
   // ---------------------------------------------------------------- 畫面
 
+  /**
+   * 畫面大小 = 畫布實際佔的大小（CSS 讓它鋪滿畫面）。**不用 window.innerWidth**：
+   * iOS（iOS 版 Chrome 也是同一個核心）剛載入時可能還回報桌面預設的 980，之後也不一定發 resize ——
+   * 鏡頭就會以為畫面有 980 寬：格子放到最大、機體偏右、地圖右半邊怎麼拖都拖不進畫面。
+   * 所以每一幀都比對一次（沒變就什麼都不做），錯過的 resize 自己會補回來。
+   */
   private resize(): void {
     const dpr = window.devicePixelRatio || 1;
-    this.viewW = window.innerWidth;
-    this.viewH = window.innerHeight;
-    this.canvas.width = Math.round(this.viewW * dpr);
-    this.canvas.height = Math.round(this.viewH * dpr);
-    this.canvas.style.width = this.viewW + 'px';
-    this.canvas.style.height = this.viewH + 'px';
+    const w = this.canvas.clientWidth;
+    const h = this.canvas.clientHeight;
+    if (w === 0 || h === 0) return;
+    if (w === this.viewW && h === this.viewH && dpr === this.dpr) return;
+    this.viewW = w;
+    this.viewH = h;
+    this.dpr = dpr;
+    this.canvas.width = Math.round(w * dpr);
+    this.canvas.height = Math.round(h * dpr);
     this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     this.dirty = true;
   }
@@ -767,6 +778,7 @@ export class Game {
   }
 
   private loop = (now: number): void => {
+    this.resize();
     const animating = this.motion.active(now) || this.fx.active(now);
     // 動畫剛結束的那一幀一定要再畫一次：速度箭頭、預測、滑行都只在靜止時畫
     if (this.wasAnimating && !animating) this.dirty = true;

@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no, maximum-scale=1"
+    />
+    <meta name="theme-color" content="#0b0e12" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' fill='%230d1013'/%3E%3Cpolygon points='4,2 12,2 16,8 12,14 4,14 0,8' fill='none' stroke='%234fd6ff' stroke-width='1.5'/%3E%3C/svg%3E"
+    />
+    <title>機體 Roguelike — 試驗場</title>
+  </head>
+  <body>
+    <!-- 地圖是滿版底層；儀表與兩個觸控盤半透明浮在上面（§9）。 -->
+    <div id="app">
+      <canvas id="map"></canvas>
+
+      <header id="hud">
+        <canvas id="dial" aria-label="姿態儀：機首是朝向，黃色箭頭是速度"></canvas>
+        <div class="hud-grid">
+          <div class="hud-line">
+            <b id="hud-chassis"></b>
+            <span id="hud-drive" class="dim"></span>
+            <span id="hud-round" class="dim right"></span>
+          </div>
+          <div class="hud-line">
+            <span id="hud-speed" class="big"></span>
+            <span id="hud-facing"></span>
+            <span id="hud-ammo" class="dim right"></span>
+          </div>
+          <div class="hud-line">
+            <div id="hud-heat" class="heat">
+              <div id="hud-heat-fill"></div>
+              <div id="hud-heat-mark"></div>
+              <span id="hud-heat-num"></span>
+            </div>
+            <div id="hud-ap"></div>
+          </div>
+        </div>
+        <div class="hud-tools">
+          <button id="btn-tune" type="button" title="調參">⚙</button>
+          <button id="btn-recenter" type="button" class="hidden" title="鏡頭回到機體">◎</button>
+        </div>
+      </header>
+
+      <footer id="controls">
+        <div id="toast" class="toast" aria-live="polite"></div>
+        <!-- 左盤：移動。3×2 六向 + 巡航 + 制動，佈局來自 ui.json 的 movePad。 -->
+        <div id="move-pad" class="pad"></div>
+        <!-- 右盤：功能盤＝座艙。佈局來自該機型座艙（ui.json 的 cockpits）。 -->
+        <div id="func-pad" class="pad"></div>
+      </footer>
+
+      <section id="tune-panel" class="sheet hidden"></section>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

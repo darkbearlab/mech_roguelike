@@ -1,0 +1,23 @@
+{
+  "_comment": "行動（§4.1）。ap = 行動點成本、heat = 產熱（負值 = 散熱）。requires 是前置條件的代號，由 core/engine.ts 解讀。",
+
+  "economy": {
+    "_apDebtCap": "透支上限。債務在後續回合優先扣抵配額；債務 > 0 時不能做任何要花 AP 的行動，也不能被動散熱（§4.1）。免費的轉向與待機不受限。",
+    "apDebtCap": 2,
+    "_overheatShutdownPhases": "熱量達上限時要停機幾個自己的階段。在自己的階段中過熱時，剩下的行動當場取消，再加上接下來的整個階段（§4.2）。",
+    "overheatShutdownPhases": 1
+  },
+
+  "actions": {
+    "wait":        { "name": "待機",   "ap": 0, "heat": 0 },
+    "lock":        { "name": "鎖定",   "ap": 1, "heat": 2,   "requires": ["WEAPON"] },
+    "fireLight":   { "name": "射擊",   "ap": 1, "heat": 6,   "requires": ["WEAPON"] },
+    "fireHeavy":   { "name": "重射擊", "ap": 3, "heat": 20,  "requires": ["WEAPON"] },
+    "reload":      { "name": "裝填",   "ap": 2, "heat": 2,   "requires": ["WEAPON"] },
+    "swap":        { "name": "換武器", "ap": 2, "heat": 0,   "requires": ["WEAPON"] },
+    "cool":        { "name": "散熱",   "ap": 1, "heat": -25 },
+    "switchDrive": { "name": "切換驅動", "ap": 1, "heat": 5, "requires": ["MULTI_DRIVE"] },
+    "_turn": "每轉一面的價格。只有超過驅動免費額度的那幾面才收（drives.json 的 turnRule）。",
+    "turn":        { "name": "轉向",   "ap": 1, "heat": 0 }
+  }
+}

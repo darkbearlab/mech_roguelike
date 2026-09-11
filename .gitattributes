@@ -1,0 +1,5 @@
+# 全部文字檔在 repo 裡一律 LF，避免 Windows 的 CRLF 讓 diff 整片變紅
+# （地圖 JSON 是逐列字串，換行符號一變就等於整張圖被改過）。
+* text=auto eol=lf
+*.png binary
+*.jpg binary

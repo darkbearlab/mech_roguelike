@@ -1,0 +1,36 @@
+{
+  "_comment": "驅動型態（§3.2）。實際加速量 accel = round(thrust / chassis.mass × SUB)，所以這裡放推力而不是 accel —— 同一具推進器裝在重的機體上就是比較慢。數值全部暫定。",
+
+  "_numbers": "與規格 §3.2 表格的差異：表格寫的是 accel 4/6/12、drag 4/6/2。但 §3.1 的解算順序是「先加速、再扣阻力」，accel == drag 時兩者在同一回合完全抵銷 —— 履帶與步行機體會永遠停在原地。這裡保留 §3.1 的順序不動，改用「淨推進 = accel − drag」重現表格的 4/6/12（外加地形阻力前），並把地面驅動的 drag 拉高到「不推就在兩回合內停下」。在質量 50 下：履帶 accel 14 / drag 10、步行 15 / 9、噴射 14 / 2。",
+
+  "_turnRule": "freeFacesPerTurn：每回合免費轉幾面。\"ANY\" = 不限。超過免費額度的每一面照 actions.json 的 turn 收費（1 AP）。",
+  "_heatPerAccel": "每 10 sub 的實際加速量產生多少熱（§4.2）。制動也算：反推同樣要燒推進器。",
+
+  "tracked": {
+    "name": "履帶",
+    "thrust": 70,
+    "drag": 10,
+    "maxSpeed": 20,
+    "turnRule": { "freeFacesPerTurn": 0 },
+    "sideAccel": false,
+    "heatPerAccel": 1
+  },
+  "walker": {
+    "name": "步行",
+    "thrust": 75,
+    "drag": 9,
+    "maxSpeed": 18,
+    "turnRule": { "freeFacesPerTurn": 1 },
+    "sideAccel": false,
+    "heatPerAccel": 2
+  },
+  "jet": {
+    "name": "噴射",
+    "thrust": 70,
+    "drag": 2,
+    "maxSpeed": 40,
+    "turnRule": { "freeFacesPerTurn": "ANY" },
+    "sideAccel": true,
+    "heatPerAccel": 4
+  }
+}

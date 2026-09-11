@@ -1,0 +1,90 @@
+name: Deploy to GitHub Pages
+
+# 沿用 PMC 的流程：推到 main 就自動 型別檢查 → 測試（含 core/ 覆蓋率門檻）→ 建置 → 部署 → 線上健檢。
+# 手機重新整理就會拿到最新版（資產檔名帶 hash，不會吃到舊快取）。
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: 型別檢查
+        run: npm run typecheck
+
+      # §1「tests/ — core/ 全覆蓋」：覆蓋率門檻寫在 vitest.config.ts，沒達到就是紅燈。
+      - name: 測試與 core/ 覆蓋率
+        run: npm run coverage
+
+      - name: bot 煙霧測試（每台 5 場）
+        run: npm run bot -- --runs 5
+
+      - name: 建置
+        run: npx vite build
+        env:
+          VITE_BUILD_ID: ${{ github.sha }}
+
+      # Pages 必須在 repo 設定為「GitHub Actions」來源（Settings → Pages → Source）。
+      # GITHUB_TOKEN 沒有建立 Pages site 的權限，所以這一步只讀設定，不會幫你開。
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    outputs:
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
+
+  # 部署完再去線上抓一次，確認手機重新整理真的會拿到「這一次」的建置。
+  # PMC 曾經被 GitHub 內建的 legacy Jekyll builder 搶先部署成未建置的原始碼（整頁空白），
+  # 那種情況以前是靜悄悄的，這一步讓 CI 直接變紅。
+  verify:
+    needs: deploy
+    runs-on: ubuntu-latest
+    steps:
+      - name: 線上健檢
+        run: |
+          URL="${{ needs.deploy.outputs.url }}"
+          SHA="${GITHUB_SHA:0:7}"
+          echo "檢查 $URL 是否為 build $SHA"
+          for i in $(seq 1 10); do
+            HTML=$(curl -fsSL "$URL?cb=$i$RANDOM" || true)
+            ASSET=$(printf '%s' "$HTML" | grep -o 'assets/index-[A-Za-z0-9_-]*\.js' | head -1 || true)
+            if [ -n "$ASSET" ] && curl -fsSL "$URL$ASSET" | grep -q "$SHA"; then
+              echo "✅ 線上版本 = $SHA（$ASSET）"
+              exit 0
+            fi
+            echo "  第 $i 次：尚未更新（asset='$ASSET'），等 CDN…"
+            sleep 15
+          done
+          echo "::error::線上頁面不是這次的建置。到 Settings → Pages 確認 Source 是 GitHub Actions（不是 Deploy from a branch）。"
+          exit 1

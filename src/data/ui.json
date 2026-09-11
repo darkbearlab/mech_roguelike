@@ -1,0 +1,57 @@
+{
+  "_comment": "呈現層與介面的旋鈕（§9）。**刻意不放在 core/ 讀的檔案裡** —— 規則層對「動畫要幾毫秒」沒有意見，把任何一個值設為 0，最終狀態必須完全相同。",
+
+  "animation": {
+    "_msPerHex": "位移動畫每一格花多少毫秒。動畫走的是 §3.1 第 6 步的那條六角直線。",
+    "msPerHex": 110,
+    "minMoveMs": 160,
+    "maxMoveMs": 650,
+    "turnMs": 120
+  },
+
+  "camera": {
+    "_hexesAcross": "畫面寬度大約看得到幾欄六角格。",
+    "hexesAcross": 11,
+    "minHexPx": 16,
+    "maxHexPx": 40,
+    "_recenterAfterMove": "移動後自動回中（§9）：拖曳平移只是暫時的，下一次加速宣告就會把鏡頭拉回機體身上。",
+    "recenterAfterMove": true,
+    "_followActingUnit": "敵人行動時鏡頭要不要跟（OFF / SNAP / PAN）。沿用 PMC 的結論預設 OFF。第 6 步有敵人之後才接線。",
+    "followActingUnit": "OFF"
+  },
+
+  "preview": {
+    "_showAllGhosts": "加速宣告時，把八個選項的預測落點全部畫在地圖上（§9：幽靈標記）。按住某一鍵時只強調那一個並畫出整條路徑。",
+    "showAllGhosts": true,
+    "_driftTurns": "巡航預測：照目前速度再滑幾回合，畫成一串虛點。慣性要看得見才讀得懂。",
+    "driftTurns": 3,
+    "_trailLength": "機體走過的軌跡保留幾個點。",
+    "trailLength": 16
+  },
+
+  "_movePad": "左盤（§9）：3×2 六向 + 巡航 + 制動。數字是方向編號 0..5，同一個代號佔兩格就是跨欄。巡航是最常按的一鍵，所以給它最大的面積。",
+  "movePad": [
+    ["5", "0", "1"],
+    ["4", "3", "2"],
+    ["CRUISE", "CRUISE", "BRAKE"]
+  ],
+
+  "_cockpits": "右盤＝座艙（§9）。每個機型在 chassis.json 指定一個座艙 id。pad 是 3×3 佈局；readouts 是資訊層 —— 機型差異應該落在「能知道什麼」而不是「按鈕在哪」，v0.1 先全開。",
+  "cockpits": {
+    "std": {
+      "name": "標準座艙",
+      "pad": [
+        ["turnL", "lock", "turnR"],
+        ["fire", "reload", "swap"],
+        ["cool", "switchDrive", "wait"]
+      ],
+      "_readouts": "heat: NUMERIC（數值）| LIGHT（只有警告燈）。speed: NUMERIC | BANDS（慢/中/快）。range: EXACT | BANDS（近/中/遠，第 3 步）。rearCamera：後方視野（第 3 步）。",
+      "readouts": {
+        "heat": "NUMERIC",
+        "speed": "NUMERIC",
+        "range": "EXACT",
+        "rearCamera": true
+      }
+    }
+  }
+}

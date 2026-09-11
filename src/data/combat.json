@@ -1,0 +1,18 @@
+{
+  "_comment": "命中與傷害常數（§6）。**第 5 步才接線** —— 現在放在這裡是為了讓規格給過的數字有一個固定的家。百分比一律寫成整數點數（75 = 75%）。",
+
+  "baseHit": 75,
+  "_k1": "自身速度每 1 格/回合扣幾點。",
+  "k1": 4,
+  "_k2": "目標速度每 1 格/回合扣幾點。",
+  "k2": 3,
+  "_stableBonus": "自身速度為 0 時的穩定平台加成。",
+  "stableBonus": 10,
+  "_heatPenalty": "熱量超過 heatPenaltyAbove × heatCap 時扣的點數（§4.2：> 70% → −15%）。",
+  "heatPenalty": 15,
+  "heatPenaltyAbove": 0.7,
+  "_debtPenalty": "AP 債務 > 0 時扣的點數（§4.1）。",
+  "debtPenalty": 10,
+  "_rangeFalloff": "距離衰減。規格沒有給值，留 null 等設計者定。",
+  "rangeFalloff": null
+}

@@ -20,6 +20,8 @@ export interface NavOptions {
   depth?: number;
   /** 要不要在目標停下來（預設要）。跑道的通過點不必停，衝過去就好。 */
   stop?: boolean;
+  /** 從這個狀態的單位開始推演（例如機動宣告裡已經轉過向的自己）；預設是 state 裡的那一個。 */
+  unit?: Unit;
 }
 
 /** 撞擊的代價，以「多離目標幾格」計。 */
@@ -36,7 +38,7 @@ const HEAT_COST = 0.01;
  * 推演時假設機首不動（轉向是右盤的事、而且可能吃速度）；每回合重新規劃，所以誤差不會累積。
  */
 export function planAccel(s: GameState, unitId: string, goal: Hex, opts: NavOptions = {}): AccelOrder {
-  const u = unitById(s, unitId)!;
+  const u = opts.unit ?? unitById(s, unitId)!;
   const w = worldOf(s, unitId);
   const depth = Math.max(1, opts.depth ?? 3);
   const stop = opts.stop ?? true;

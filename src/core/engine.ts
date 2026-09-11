@@ -9,6 +9,9 @@
  * 一回合 = 解算順序模組（order.ts）排出的步驟表。引擎只負責一步一步走：
  * 需要輸入的步驟（DECLARE、ACT）停下來等指令；自動步驟（MOVE、WORLD、停機中的單位）直接走完。
  *
+ * 機動宣告（左盤，DECLARE）= 轉向 ＋ 加速，一起決定、一起送出（設計者 2026-09-11：轉向在移動前決定）。
+ * 轉向照驅動收費（免費面數、AP、扣速度），宣告時不能透支。
+ *
  * 行動階段（右盤）什麼時候結束：
  *   - 主動按待機
  *   - AP 用完（歸零）
@@ -30,7 +33,7 @@ import { ORDERS } from './order';
 import { createRng, nextFloat } from './rng';
 import type { Rules } from './rules';
 import { duelAction } from './ai';
-import { scriptAccel, scriptFacing } from './script';
+import { scriptDeclare } from './script';
 import type { AccelOrder, Command, GameEvent, GameState, Side, Step, Unit } from './state';
 import { activeUnit, currentStep, unitById } from './state';
 
@@ -161,6 +164,40 @@ export function turnPrice(rules: Rules, u: Unit): { ap: number; heat: number } {
   return { ap: rules.actions.turn.ap, heat: rules.actions.turn.heat };
 }
 
+export interface TurnPlan {
+  ok: boolean;
+  reason?: string;
+  /** 轉完之後的單位（機首、速度、AP、已轉面數）。不合法時是原本的單位。 */
+  unit: Unit;
+  ap: number;
+  heat: number;
+}
+
+/**
+ * 機動宣告裡的轉向：一面一面照 turnPrice 收費，依驅動扣速度（例如噴射每面 −1 速）。
+ * 宣告時不能透支 —— 付不起就不合法（行動階段才有透支）。
+ * 純函式：介面拿它畫「轉完之後」的預測，AI 拿它推演，引擎拿它結算。
+ */
+export function planTurn(rules: Rules, u: Unit, turn: number): TurnPlan {
+  const fail = (reason: string): TurnPlan => ({ ok: false, reason, unit: u, ap: 0, heat: 0 });
+  if (!Number.isInteger(turn) || Math.abs(turn) > 3) return fail('一次最多轉半圈（−3 到 3 面）');
+  if (turn !== 0 && u.shutdown > 0) return fail('停機中不能轉向');
+  const n: Unit = { ...u };
+  let ap = 0;
+  let heat = 0;
+  for (let i = 0; i < Math.abs(turn); i++) {
+    const p = turnPrice(rules, n);
+    if (p.ap > n.ap) return fail(`AP 不夠：第 ${i + 1} 面要 ${p.ap} AP（${rules.drives[n.drive].name}的免費轉向用完了）`);
+    n.ap -= p.ap;
+    ap += p.ap;
+    heat += p.heat;
+    n.facing = rotate(n.facing, Math.sign(turn));
+    n.facesTurned++;
+    n.speed = Math.max(0, n.speed - driveOf(rules, n).facingTurnSpeedLoss);
+  }
+  return { ok: true, unit: n, ap, heat };
+}
+
 export function checkLegal(s: GameState, cmd: Command): Legal {
   if (s.over) return no('對局已結束');
   const step = currentStep(s);
@@ -169,14 +206,17 @@ export function checkLegal(s: GameState, cmd: Command): Legal {
   const rules = s.rules;
 
   if (cmd.type === 'ACCEL') {
-    if (step.kind !== 'DECLARE') return no('這回合已經宣告過加速');
-    const l = accelLegality(rules, u, cmd.order);
+    if (step.kind !== 'DECLARE') return no('這回合已經宣告過機動');
+    const t = planTurn(rules, u, cmd.turn ?? 0);
+    if (!t.ok) return no(t.reason!);
+    // 加速方向是相對轉完之後的機首
+    const l = accelLegality(rules, t.unit, cmd.order);
     if (!l.ok) return no(l.reason!);
-    return { ok: true, ap: 0, heat: accelHeat(driveOf(rules, u), cmd.order), overdraft: 0 };
+    return { ok: true, ap: t.ap, heat: t.heat + accelHeat(driveOf(rules, t.unit), cmd.order), overdraft: 0 };
   }
 
-  // 其餘都是行動：順序是 左盤加速 → 位移 → 右盤行動。
-  if (step.kind !== 'ACT') return no('先在左盤確認加速：行動在位移之後');
+  // 其餘都是行動：順序是 左盤機動（轉向＋加速）→ 位移 → 右盤行動。
+  if (step.kind !== 'ACT') return no('先在左盤確認機動：行動在位移之後');
 
   const priced = (ap: number, heat: number): Legal => {
     const c = checkAp(rules, u, ap);
@@ -185,10 +225,6 @@ export function checkLegal(s: GameState, cmd: Command): Legal {
   };
 
   switch (cmd.type) {
-    case 'TURN': {
-      const p = turnPrice(rules, u);
-      return priced(p.ap, p.heat);
-    }
     case 'FIRE': {
       const w = weaponOf(rules, u);
       const target = unitById(s, cmd.targetId);
@@ -230,7 +266,7 @@ export function applyCommand(s: GameState, cmd: Command): { state: GameState; ev
   const u = activeUnit(n)!;
 
   if (cmd.type === 'ACCEL') {
-    u.pendingAccel = cmd.order;
+    declare(n, u, cmd.turn ?? 0, cmd.order, ev);
     proceed(n, ev);
   } else {
     const reason = perform(n, u, cmd, legal, ev);
@@ -242,6 +278,21 @@ export function applyCommand(s: GameState, cmd: Command): { state: GameState; ev
   return { state: n, events: ev };
 }
 
+/** 機動宣告（已經確認合法）：先一面一面轉（收費、扣速度、發 TURNED），再記下這回合的加速。 */
+function declare(s: GameState, u: Unit, turn: number, order: AccelOrder, ev: GameEvent[]): void {
+  for (let i = 0; i < Math.abs(turn); i++) {
+    const p = turnPrice(s.rules, u);
+    spendAp(u, p.ap);
+    const from = u.facing;
+    u.facing = rotate(from, Math.sign(turn));
+    u.facesTurned++;
+    u.speed = Math.max(0, u.speed - driveOf(s.rules, u).facingTurnSpeedLoss);
+    ev.push({ type: 'TURNED', unitId: u.id, from, to: u.facing, speed: u.speed });
+    heat(s, u, p.heat, ev);
+  }
+  u.pendingAccel = order;
+}
+
 type ActionCommand = Exclude<Command, { type: 'ACCEL' }>;
 
 /**
@@ -251,18 +302,6 @@ type ActionCommand = Exclude<Command, { type: 'ACCEL' }>;
 function perform(n: GameState, u: Unit, cmd: ActionCommand, legal: Legal, ev: GameEvent[]): EndReason | null {
   const rules = n.rules;
   switch (cmd.type) {
-    case 'TURN': {
-      const p = turnPrice(rules, u);
-      spendAp(u, p.ap);
-      const from = u.facing;
-      u.facing = rotate(from, cmd.delta);
-      u.facesTurned++;
-      // 依機體類型，轉動機身也會吃掉速度
-      u.speed = Math.max(0, u.speed - driveOf(rules, u).facingTurnSpeedLoss);
-      ev.push({ type: 'TURNED', unitId: u.id, from, to: u.facing, speed: u.speed });
-      heat(n, u, p.heat, ev);
-      break;
-    }
     case 'FIRE': {
       const w = weaponOf(rules, u)!;
       const target = unitById(n, cmd.targetId)!;
@@ -360,9 +399,12 @@ function arrive(s: GameState, step: Step, ev: GameEvent[]): boolean {
         u.pendingAccel = null;
         return true;
       }
-      // 自動單位：照腳本宣告，不等輸入
+      // 自動單位：照腳本宣告機動（轉向＋加速），跟玩家同一套合法性與結算
       if (u.control === 'SCRIPT') {
-        u.pendingAccel = scriptAccel(s, u);
+        const d = scriptDeclare(s, u);
+        // 腳本只會挑合法的宣告；萬一不合法（例如調參改出來的組合）就當作不轉、不加速
+        const ok = checkLegal(s, { type: 'ACCEL', order: d.order, turn: d.turn }).ok;
+        declare(s, u, ok ? d.turn : 0, ok ? d.order : null, ev);
         return true;
       }
       return false;
@@ -387,13 +429,8 @@ function arrive(s: GameState, step: Step, ev: GameEvent[]): boolean {
         runAi(s, u, ev);
         return true;
       }
-      // 自動單位：巡邏的把機首轉向目標（靶機轉向免費），然後結束
+      // 靶：沒有行動（轉向已經在機動宣告裡做了）
       if (u.control === 'SCRIPT') {
-        const to = scriptFacing(u);
-        if (to !== null) {
-          ev.push({ type: 'TURNED', unitId: u.id, from: u.facing, to, speed: u.speed });
-          u.facing = to;
-        }
         endPhase(u, 'WAIT', ev);
         return true;
       }

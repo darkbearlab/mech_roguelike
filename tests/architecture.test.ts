@@ -36,7 +36,8 @@ describe('分層', () => {
 describe('介面資料與規則對得上', () => {
   type Cockpit = { pad: string[][]; readouts: Record<string, unknown> };
   const cockpits = ui.cockpits as Record<string, Cockpit>;
-  const PAD_KEYS = new Set(['turnL', 'turnR', 'lock', 'fire', 'reload', 'swap', 'cool', 'switchDrive', 'wait']);
+  // "" = 保留的空位（轉向搬到左盤之後，右盤原本轉向的兩格留給未決的功能）
+  const PAD_KEYS = new Set(['', 'lock', 'fire', 'reload', 'swap', 'cool', 'switchDrive', 'wait']);
 
   it('每台機體的座艙都有定義', () => {
     for (const c of Object.values(RULES.chassis)) expect(cockpits[c.cockpit], c.id).toBeDefined();
@@ -50,11 +51,16 @@ describe('介面資料與規則對得上', () => {
     }
   });
 
-  it('左盤跟著機首排：上排 左前／前／右前、中間確認、下排 左後／後／右後', () => {
+  it('左盤＝機動宣告：最上排轉向（左轉／機首／右轉）、再來 左前／前／右前、確認、左後／後／右後', () => {
     const pad = ui.movePad as string[][];
-    expect(pad[0]).toEqual(['5', '0', '1']);
-    expect(pad[1][1]).toBe('OK');
-    expect(pad[2]).toEqual(['4', '3', '2']);
-    expect(new Set(pad.flat().filter(Boolean))).toEqual(new Set(['0', '1', '2', '3', '4', '5', 'OK']));
+    expect(pad[0]).toEqual(['L', 'NOSE', 'R']);
+    expect(pad[1]).toEqual(['5', '0', '1']);
+    expect(pad[2][1]).toBe('OK');
+    expect(pad[3]).toEqual(['4', '3', '2']);
+    expect(new Set(pad.flat().filter(Boolean))).toEqual(new Set(['0', '1', '2', '3', '4', '5', 'OK', 'L', 'R', 'NOSE']));
+  });
+
+  it('右盤不再有轉向', () => {
+    for (const c of Object.values(cockpits)) expect(c.pad.flat().some((k) => k.startsWith('turn'))).toBe(false);
   });
 });

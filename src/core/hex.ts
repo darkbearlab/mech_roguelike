@@ -116,6 +116,12 @@ export function relDir(a: Dir, b: Dir): Dir {
   return ((((b - a) % 6) + 6) % 6) as Dir;
 }
 
+/** 從 a 轉到 b 走近的那一邊：正 = 右轉幾面、負 = 左轉幾面（−2..3；正後方算右轉 3 面）。 */
+export function turnDelta(a: Dir, b: Dir): number {
+  const cw = relDir(a, b);
+  return cw <= 3 ? cw : cw - 6;
+}
+
 /** 前方三面：朝向本身與左右各一面。 */
 export function inFrontArc(facing: Dir, d: Dir): boolean {
   return turnSteps(facing, d) <= 1;

@@ -15,9 +15,10 @@ import { arcHexes, inOptimal, shotCheck, targetsFor, weaponOf } from '../core/co
 import type { ShotCheck } from '../core/combat';
 import { hooksOf } from '../core/course';
 import type { CourseHook } from '../core/course';
-import { applyCommand, checkLegal, newGame, turnPrice } from '../core/engine';
+import { applyCommand, checkLegal, newGame, planTurn } from '../core/engine';
+import type { TurnPlan } from '../core/engine';
 import type { Hex } from '../core/hex';
-import { hexDist, hexRound, sameHex } from '../core/hex';
+import { DIR_NAME, hexDist, hexRound, sameHex } from '../core/hex';
 import type { GameMap } from '../core/map';
 import { cellAt, duelists, loadMap, withUnitChassis } from '../core/map';
 import { accelLegality, driveOf, maxTaps, resolveMotion, worldOf } from '../core/movement';
@@ -40,7 +41,7 @@ import { UI } from './config';
 import { $ } from './dom';
 import { Hud } from './hud';
 import { Pads } from './pads';
-import type { ConfirmView, FuncKeyView, MoveKeyView } from './pads';
+import type { ConfirmView, FuncKeyView, MoveKeyView, TurnView } from './pads';
 import { bestOf, recordFinish, savePrefs } from './prefs';
 import { TuningPanel, loadPatch } from './tuning';
 
@@ -53,8 +54,7 @@ export interface GameOptions {
 }
 
 const FUNC_LABEL: Record<PadKey, string> = {
-  turnL: '⟲ 左轉', turnR: '右轉 ⟳', lock: '鎖定', fire: '射擊', reload: '裝填',
-  swap: '換武器', cool: '散熱', switchDrive: '換驅動', wait: '待機',
+  lock: '鎖定', fire: '射擊', reload: '裝填', swap: '換武器', cool: '散熱', switchDrive: '換驅動', wait: '待機',
 };
 
 /** 相對機首方向的箭頭：左盤跟著機首排，所以「前」永遠是 ↑。 */
@@ -101,8 +101,10 @@ export class Game {
 
   private pan: Pt = { x: 0, y: 0 };
   private picked: Hex | null = null;
-  /** 左盤目前的選擇（還沒確認）。 */
+  /** 左盤目前的選擇（還沒確認）：加速方向與點數（相對轉完之後的機首）。 */
   private sel: AccelOrder = null;
+  /** 左盤目前選的轉向：正 = 右轉幾面、負 = 左轉幾面（還沒確認）。 */
+  private turnSel = 0;
   /** 選中的目標。手動選的留到這一回合結束（或打爆）；自動選的會換成命中率最高的。 */
   private target: string | null = null;
   private targetManual = false;
@@ -117,6 +119,7 @@ export class Game {
     this.rival = opts.rival;
     this.pads = new Pads($('move-pad'), $('func-pad'), {
       tap: (rel) => this.tap(rel as RelDir),
+      turn: (delta) => this.turnTap(delta),
       confirm: () => this.confirm(),
       action: (k) => this.pressFunc(k),
       refused: (reason) => this.hud.toast(reason, 'warn'),
@@ -168,6 +171,7 @@ export class Game {
     this.pan = { x: 0, y: 0 };
     this.picked = null;
     this.sel = null;
+    this.turnSel = 0;
     this.target = null;
     this.targetManual = false;
     this.motion.finish();
@@ -238,10 +242,32 @@ export class Game {
     this.refresh();
   }
 
+  /**
+   * 左盤的轉向：+1 右轉一面、−1 左轉一面、0 = 不轉。只是選擇，確認時才跟加速一起送出；
+   * 付不起（AP、免費面數用完）或超過半圈就說為什麼。
+   */
+  private turnTap(delta: number): void {
+    const next = delta === 0 ? 0 : this.turnSel + delta;
+    const plan = planTurn(this.rules, this.me(), next);
+    if (!plan.ok) {
+      this.hud.toast(plan.reason ?? '轉不過去', 'warn');
+      return;
+    }
+    this.turnSel = next;
+    this.refresh();
+  }
+
+  /** 照左盤目前選的轉向，轉完之後的自己（機首、速度、AP）。 */
+  private pending(): Unit {
+    return planTurn(this.rules, this.me(), this.turnSel).unit;
+  }
+
   private confirm(): void {
     const order = this.sel;
+    const turn = this.turnSel;
     this.sel = null;
-    this.dispatch({ type: 'ACCEL', order });
+    this.turnSel = 0;
+    this.dispatch({ type: 'ACCEL', order, turn });
   }
 
   // ---------------------------------------------------------------- 指令
@@ -287,8 +313,6 @@ export class Game {
 
   private pressFunc(k: PadKey): void {
     switch (k) {
-      case 'turnL': return this.dispatch({ type: 'TURN', delta: -1 });
-      case 'turnR': return this.dispatch({ type: 'TURN', delta: 1 });
       case 'fire': return this.fire();
       case 'reload': return this.dispatch({ type: 'RELOAD' });
       case 'cool': return this.dispatch({ type: 'COOL' });
@@ -319,10 +343,9 @@ export class Game {
    * 靶在玩家行動之後才動，所以用它算出來的命中率就是行動階段的命中率。
    */
   private shooter(): Unit {
-    const u = this.me();
-    if (!this.isDeclare()) return u;
+    if (!this.isDeclare()) return this.me();
     const m = this.predict();
-    return { ...u, pos: m.pos, heading: m.heading, speed: m.speed };
+    return { ...this.pending(), pos: m.pos, heading: m.heading, speed: m.speed };
   }
 
   private checkOn(t: Unit): ShotCheck {
@@ -517,9 +540,9 @@ export class Game {
     return !this.state.over && !!u && u.side === 'PLAYER' && currentStep(this.state)?.kind === 'ACT';
   }
 
-  /** 左盤目前的選擇會發生什麼。 */
+  /** 左盤目前的選擇（轉向＋加速）會發生什麼。 */
   private predict(): MotionResult {
-    return resolveMotion(worldOf(this.state, 'player'), this.me(), this.sel);
+    return resolveMotion(worldOf(this.state, 'player'), this.pending(), this.sel);
   }
 
   /** 滑行預測：從 base 開始都不加速，再滑幾回合（停了或撞了就停）。 */
@@ -556,12 +579,12 @@ export class Game {
       max: maxTaps(drive, rel as RelDir),
       taps: this.sel && this.sel.rel === rel ? this.sel.taps : 0,
     }));
-    this.pads.updateMove(moves, this.confirmView(declare), declare);
+    this.pads.updateMove(moves, this.confirmView(declare), this.turnView(declare), declare);
 
     // 右盤
     const cp = this.cockpit();
     this.pads.buildFunc(cp.pad);
-    this.pads.updateFunc(cp.pad.flat().map((k) => this.funcView(k)), act);
+    this.pads.updateFunc(cp.pad.flat().filter((k): k is PadKey => k !== '').map((k) => this.funcView(k)), act);
 
     this.hud.update({
       chassisName: c.name,
@@ -635,18 +658,50 @@ export class Game {
     $('course-hint').textContent = brief + (best !== null ? `（最佳 ${best} 回合）` : '');
   }
 
-  /** 中間確認鍵上寫這回合會變成什麼：「3速 → 轉60° −1 +2 → 4速↖」。 */
+  /** 確認鍵上寫這回合會變成什麼：「3速 轉向−1 → 轉60° −1 +2 → 4速↖」。 */
   private confirmView(declare: boolean): ConfirmView {
     if (!declare) return { label: '確認', sub: '行動階段' };
     const m = this.predict();
     const u = this.me();
-    if (!this.sel && u.speed === 0) return { label: '空過', sub: '靜止、不加速' };
+    const t = this.pending();
+    if (!this.sel && u.speed === 0) return { label: '空過', sub: this.turnSel ? '原地轉向、不加速' : '靜止、不加速' };
     const dir = m.speed > 0 ? DIR_GLYPH[m.heading] : '';
-    const parts = [`${u.speed}速`, KIND_TEXT[m.kind]];
+    const parts = [`${u.speed}速`];
+    if (t.speed < u.speed) parts.push(`轉向 −${u.speed - t.speed}`);
+    parts.push(KIND_TEXT[m.kind]);
     if (m.loss > 0) parts.push(`−${m.loss}`);
     if (this.sel) parts.push(m.kind === 'BRAKE' ? `−${this.sel.taps}` : `+${this.sel.taps}`);
     else if (m.kind === 'COAST') parts.push(`−${driveOf(this.rules, u).decay}`);
     return { label: '確認', sub: `${parts.join(' ')} → ${m.speed}速${dir}${m.collision ? '（撞）' : ''}` };
+  }
+
+  /** 轉向那一排：轉完之後的機首與代價；左右鍵寫「再轉一面」要付多少。 */
+  private turnView(declare: boolean): TurnView {
+    const u = this.me();
+    const now = planTurn(this.rules, u, this.turnSel);
+    const t = now.unit;
+    const price = (p: TurnPlan): string => {
+      const bits = [p.ap > 0 ? `${p.ap} AP` : '免費'];
+      if (p.unit.speed < u.speed) bits.push(`−${u.speed - p.unit.speed}速`);
+      return bits.join(' ');
+    };
+    const step = (d: number): string => {
+      if (!declare) return '';
+      const p = planTurn(this.rules, u, this.turnSel + d);
+      if (!p.ok) return '—';
+      const extra = { ...p, ap: p.ap - now.ap, unit: { ...p.unit, speed: u.speed - (t.speed - p.unit.speed) } };
+      return price(extra);
+    };
+    // 機首那格很窄：「右1面」「右2面 1AP」「左1面 −1速」
+    const side = this.turnSel > 0 ? '右' : '左';
+    const cost = [now.ap > 0 ? `${now.ap}AP` : '', t.speed < u.speed ? `−${u.speed - t.speed}速` : ''].filter(Boolean).join(' ');
+    return {
+      noseLabel: `${DIR_GLYPH[t.facing]}${DIR_NAME[t.facing]}`,
+      noseSub: !declare ? '機首' : this.turnSel === 0 ? '不轉' : `${side}${Math.abs(this.turnSel)}面${cost ? ' ' + cost : ''}`,
+      turning: this.turnSel !== 0,
+      leftSub: step(-1),
+      rightSub: step(1),
+    };
   }
 
   private funcView(k: PadKey): FuncKeyView {
@@ -661,19 +716,13 @@ export class Game {
     // 成本一律照資料寫（不從 checkLegal 拿：加速階段的 checkLegal 會以「還沒到行動階段」拒絕，成本是 0）
     const acts = this.rules.actions;
     const w = weaponOf(this.rules, u);
-    const cmd: Command = k === 'turnL' ? { type: 'TURN', delta: -1 }
-      : k === 'turnR' ? { type: 'TURN', delta: 1 }
-        : k === 'reload' ? { type: 'RELOAD' }
-          : k === 'cool' ? { type: 'COOL' }
-            : k === 'switchDrive' ? { type: 'SWITCH_DRIVE' }
-              : { type: 'WAIT' };
+    const cmd: Command = k === 'reload' ? { type: 'RELOAD' }
+      : k === 'cool' ? { type: 'COOL' }
+        : k === 'switchDrive' ? { type: 'SWITCH_DRIVE' }
+          : { type: 'WAIT' };
     const l = checkLegal(s, cmd);
     let sub: string;
-    if (k === 'turnL' || k === 'turnR') {
-      const loss = driveOf(this.rules, u).facingTurnSpeedLoss;
-      const p = turnPrice(this.rules, u);
-      sub = (p.ap === 0 ? '免費' : costText(p.ap, p.heat)) + (loss > 0 ? ` −${loss}速` : '');
-    } else if (k === 'reload') {
+    if (k === 'reload') {
       // 彈數在儀表上（步槍 5/6），鍵上只寫成本
       sub = w ? costText(w.reload.ap, w.reload.heat) : '沒有武器';
     } else if (k === 'cool') {
@@ -771,13 +820,13 @@ export class Game {
       this.refresh();
     });
 
-    // 桌機測試用的鍵盤（跟著機首）：W 前、E 右前、D 右後、S 後、A 左後、Q 左前、空白 確認；
-    // ← → 轉向、F 射擊、R 裝填、Tab 換目標、C 散熱、V 切換、Enter 待機
+    // 桌機測試用的鍵盤（跟著機首）：W 前、E 右前、D 右後、S 後、A 左後、Q 左前、← → 轉向、空白 確認；
+    // F 射擊、R 裝填、Tab 換目標、C 散熱、V 切換、Enter 待機
     const keys: Record<string, () => void> = {
       w: () => this.keyTap(0), e: () => this.keyTap(1), d: () => this.keyTap(2),
       s: () => this.keyTap(3), a: () => this.keyTap(4), q: () => this.keyTap(5),
       ' ': () => (this.isDeclare() ? this.confirm() : this.hud.toast('行動階段：按 Enter（待機）結束這一回合', 'warn')),
-      arrowleft: () => this.pressFunc('turnL'), arrowright: () => this.pressFunc('turnR'),
+      arrowleft: () => this.keyTurn(-1), arrowright: () => this.keyTurn(1),
       f: () => this.keyFunc('fire'), r: () => this.keyFunc('reload'), tab: () => this.cycleTarget(),
       c: () => this.pressFunc('cool'), v: () => this.pressFunc('switchDrive'), enter: () => this.pressFunc('wait'),
     };
@@ -797,6 +846,14 @@ export class Game {
       return;
     }
     this.tap(rel);
+  }
+
+  private keyTurn(delta: number): void {
+    if (!this.isDeclare()) {
+      this.hud.toast('轉向在左盤、移動之前決定：下一回合再轉', 'warn');
+      return;
+    }
+    this.turnTap(delta);
   }
 
   /** 鍵盤走和觸控盤一樣的路：不能按就說為什麼。 */
@@ -909,13 +966,14 @@ export class Game {
       let drift: Hex[];
       if (declare) {
         const m = this.predict();
+        const facing = this.pending().facing;
         preview = {
-          path: m.path, pos: m.pos, heading: m.heading, speed: m.speed,
-          collision: m.collision?.at ?? null, selected: this.sel !== null,
+          path: m.path, pos: m.pos, heading: m.heading, speed: m.speed, facing,
+          collision: m.collision?.at ?? null, selected: this.sel !== null || this.turnSel !== 0,
         };
         const drive = driveOf(this.rules, u);
         hint = {
-          facing: u.facing,
+          facing,
           taps: [0, 1, 2, 3, 4, 5].map((r) => maxTaps(drive, r as RelDir)),
           sel: this.sel,
         };

@@ -2,10 +2,10 @@
  * 決鬥：自動駕駛開玩家那台，用的是跟敵機**同一顆腦袋**（core/ai.ts），但一律透過 applyCommand 送指令 ——
  * 能做的事跟玩家在觸控盤上能做的完全相同。兩邊對稱，勝率反映的是機體相剋與先後手，不是 AI 的差距。
  *
- * 順便數玩家「按了幾下」：左盤點幾下 + 確認 1 下 + 右盤每個行動 1 下（待機也算）——
+ * 順便數玩家「按了幾下」：左盤轉幾面 + 點幾下 + 確認 1 下 + 右盤每個行動 1 下（待機也算）——
  * 操作繁瑣的程度要有數字，之後設計儀式感時才有東西可以對。
  */
-import { duelAccel, duelAction } from '../src/core/ai';
+import { duelAction, duelDeclare } from '../src/core/ai';
 import { applyCommand, newGame } from '../src/core/engine';
 import type { GameMap } from '../src/core/map';
 import { duelists, withUnitChassis } from '../src/core/map';
@@ -42,9 +42,10 @@ export function runDuel(rules: Rules, map: GameMap, chassis: string, rival: stri
   while (!s.over && s.round <= maxTurns) {
     const me = unitById(s, 'player')!;
     if (currentStep(s)!.kind === 'DECLARE') {
-      const order = duelAccel(s, me);
-      inputs += (order?.taps ?? 0) + 1;
-      send({ type: 'ACCEL', order });
+      // 左盤：轉幾面就按幾下、點幾下、再確認
+      const d = duelDeclare(s, me);
+      inputs += Math.abs(d.turn) + (d.order?.taps ?? 0) + 1;
+      send({ type: 'ACCEL', order: d.order, turn: d.turn });
     } else {
       inputs++;
       send(duelAction(s, me));

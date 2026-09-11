@@ -32,7 +32,7 @@ export interface Cockpit {
 }
 
 export interface UiConfig {
-  animation: { msPerHex: number; maxMoveMs: number; turnMs: number };
+  animation: { msPerHex: number; maxMoveMs: number; turnMs: number; shotMs: number; floatMs: number };
   camera: {
     hexesAcross: number;
     minHexPx: number;

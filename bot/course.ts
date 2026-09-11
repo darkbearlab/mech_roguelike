@@ -1,7 +1,8 @@
 /**
- * 情境測試：讓自動駕駛跑一條跑道，量每台機體要幾回合、每個檢查點在第幾回合過。
+ * 情境測試：讓自動駕駛跑一條跑道，量每台機體要幾回合、每個檢查點在第幾回合過；
+ * 有靶的跑道另外量射了幾發、中了幾發、打爆幾個。
  *
- * 跑道是固定的，所以同一份規則永遠跑出同一個結果 —— 改數值之後重跑，差多少一目了然。
+ * 跑道是固定的，擲骰用固定種子，所以同一份規則永遠跑出同一個結果 —— 改數值之後重跑，差多少一目了然。
  */
 import { newGame } from '../src/core/engine';
 import type { GameMap } from '../src/core/map';
@@ -18,13 +19,21 @@ export interface CourseResult {
   splits: number[];
   heatPeak: number;
   collisions: number;
+  shots: number;
+  hits: number;
+  kills: number;
+  /** 這一局總共出現過幾個靶。 */
+  targets: number;
 }
 
-export function runCourse(rules: Rules, map: GameMap, chassis: string, maxTurns = 120): CourseResult {
+export function runCourse(rules: Rules, map: GameMap, chassis: string, maxTurns = 120, seed = 1): CourseResult {
   const course = map.course;
   if (!course) throw new Error(`地圖 ${map.id} 沒有跑道`);
-  let s = newGame(rules, map, { seed: 1, player: { chassis } });
-  const r: CourseResult = { chassis, finished: false, turns: maxTurns, splits: [], heatPeak: 0, collisions: 0 };
+  let s = newGame(rules, map, { seed, player: { chassis } });
+  const r: CourseResult = {
+    chassis, finished: false, turns: maxTurns, splits: [], heatPeak: 0, collisions: 0,
+    shots: 0, hits: 0, kills: 0, targets: 0,
+  };
   const goal = (st: GameState) => {
     const cp = course.checkpoints[Math.min(st.course!.next, course.checkpoints.length - 1)];
     return { at: cp.at, stop: cp.type === 'STOP' };
@@ -40,5 +49,7 @@ export function runCourse(rules: Rules, map: GameMap, chassis: string, maxTurns 
     r.finished = true;
     r.turns = s.course!.done;
   }
+  Object.assign(r, s.stats);
+  r.targets = s.units.filter((u) => rules.chassis[u.chassis].role === 'TARGET').length;
   return r;
 }

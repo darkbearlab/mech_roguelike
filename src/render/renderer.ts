@@ -1,7 +1,8 @@
 /**
  * Canvas 2D 繪製。只讀 GameState，不改動任何東西。
  *
- * 圖層由下而上：地形 → 軌跡 → 巡航預測 → 這回合的預測路徑與落點 → 左盤方向提示 → 單位 → 點選的格子。
+ * 圖層由下而上：地形 → 跑道 → 射界 → 軌跡 → 巡航預測 → 這回合的預測路徑與落點 → 殘骸 → 單位
+ * → 目標標籤 → 左盤方向提示 → 畫面外箭頭 → 點選的格子 → 曳光與飄字。
  * 機體永遠畫在格子中心（只有位移動畫的途中會在兩格之間）。
  */
 import type { Checkpoint } from '../core/course';
@@ -13,6 +14,7 @@ import { allHexes, cellAt } from '../core/map';
 import type { GameState, Unit } from '../core/state';
 import type { Camera, SafeArea } from './camera';
 import { worldToScreen } from './camera';
+import type { Effects } from './effects';
 import type { Pt } from './geometry';
 import { axialToWorld, dirAngle, hexCorners } from './geometry';
 import type { AxialPt, Motion } from './motion';
@@ -43,6 +45,19 @@ export interface CourseView {
   start: Hex;
 }
 
+/** 射界 × 射程涵蓋的格子；optimal = 落在有利射程內（畫亮一點）。 */
+export interface ArcCell {
+  hex: Hex;
+  optimal: boolean;
+}
+
+/** 目標：誰被選中、每個打得到的目標頭上寫多少命中率。 */
+export interface TargetView {
+  selected: string | null;
+  /** unitId → 命中率；不在表裡 = 現在打不到。 */
+  chance: Map<string, number>;
+}
+
 export interface Scene {
   state: GameState;
   cam: Camera;
@@ -59,6 +74,10 @@ export interface Scene {
   trail: Hex[];
   picked: Hex | null;
   course: CourseView | null;
+  /** 行動階段才有：這把武器現在打得到哪些格子。 */
+  arc: ArcCell[] | null;
+  targets: TargetView | null;
+  fx: Effects;
 }
 
 const C = {
@@ -94,6 +113,17 @@ const C = {
   cpDim: 'rgba(125,255,154,0.35)',
   cpDone: 'rgba(255,255,255,0.12)',
   cpLine: 'rgba(125,255,154,0.22)',
+  // 射擊：射界是機體的屬性（青色）；準星與命中率用白色，最醒目
+  arcCell: 'rgba(79,214,255,0.07)',
+  arcOptimal: 'rgba(79,214,255,0.15)',
+  reticle: '#ffffff',
+  reticleDim: 'rgba(255,255,255,0.45)',
+  hpBack: 'rgba(0,0,0,0.6)',
+  hp: '#7dff9a',
+  hpLow: '#ff5a5a',
+  wreck: 'rgba(255,107,90,0.35)',
+  tracerHit: '#ffe08a',
+  tracerMiss: 'rgba(255,255,255,0.55)',
 } as const;
 
 function tracePoly(ctx: CanvasRenderingContext2D, pts: Pt[]): void {
@@ -341,31 +371,37 @@ function drawUnit(ctx: CanvasRenderingContext2D, sc: Scene, u: Unit): void {
     ctx.stroke();
   }
 
-  // 機首前方的半平面：日後的武器射界
-  ctx.beginPath();
-  ctx.moveTo(c.x, c.y);
-  ctx.arc(c.x, c.y, s * 1.6, face - Math.PI / 2, face + Math.PI / 2);
-  ctx.closePath();
-  ctx.fillStyle = C.arc;
-  ctx.fill();
+  // 有武器的機體：機首前方畫一小片扇形，一眼看得出槍口朝哪（完整射界在行動階段另外畫）
+  if (sc.state.rules.chassis[u.chassis].weapon) {
+    ctx.beginPath();
+    ctx.moveTo(c.x, c.y);
+    ctx.arc(c.x, c.y, s * 1.6, face - Math.PI / 2, face + Math.PI / 2);
+    ctx.closePath();
+    ctx.fillStyle = C.arc;
+    ctx.fill();
+  }
 
-  // 機身
   const r = s * 0.42;
-  ctx.beginPath();
-  ctx.arc(c.x, c.y, r, 0, Math.PI * 2);
-  ctx.fillStyle = '#0b0e12';
-  ctx.fill();
-  ctx.strokeStyle = color;
-  ctx.lineWidth = 2.5;
-  ctx.stroke();
-  // 機首
-  ctx.beginPath();
-  ctx.moveTo(c.x + Math.cos(face) * r * 1.35, c.y + Math.sin(face) * r * 1.35);
-  ctx.lineTo(c.x + Math.cos(face + 2.4) * r * 0.75, c.y + Math.sin(face + 2.4) * r * 0.75);
-  ctx.lineTo(c.x + Math.cos(face - 2.4) * r * 0.75, c.y + Math.sin(face - 2.4) * r * 0.75);
-  ctx.closePath();
-  ctx.fillStyle = color;
-  ctx.fill();
+  if (sc.state.rules.chassis[u.chassis].role === 'TARGET') {
+    drawTargetBody(ctx, c, r, color, sc.state.rules.drives[u.drive].maxSpeed > 0);
+  } else {
+    // 機身
+    ctx.beginPath();
+    ctx.arc(c.x, c.y, r, 0, Math.PI * 2);
+    ctx.fillStyle = '#0b0e12';
+    ctx.fill();
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2.5;
+    ctx.stroke();
+    // 機首
+    ctx.beginPath();
+    ctx.moveTo(c.x + Math.cos(face) * r * 1.35, c.y + Math.sin(face) * r * 1.35);
+    ctx.lineTo(c.x + Math.cos(face + 2.4) * r * 0.75, c.y + Math.sin(face + 2.4) * r * 0.75);
+    ctx.lineTo(c.x + Math.cos(face - 2.4) * r * 0.75, c.y + Math.sin(face - 2.4) * r * 0.75);
+    ctx.closePath();
+    ctx.fillStyle = color;
+    ctx.fill();
+  }
 
   if (u.shutdown > 0) {
     ctx.fillStyle = C.hit;
@@ -380,6 +416,158 @@ function drawUnit(ctx: CanvasRenderingContext2D, sc: Scene, u: Unit): void {
     const tip = toScreen(cam, add(u.pos, scale(DIR_VEC[u.heading], u.speed)));
     drawArrow(ctx, c, tip, C.vel, 2);
   }
+
+  // 耐久：靶一直顯示；自己受損了才顯示
+  const maxHp = sc.state.rules.chassis[u.chassis].hp;
+  if (u.side !== 'PLAYER' || u.hp < maxHp) {
+    const w = s * 0.9;
+    const y = c.y + r * 1.35;
+    ctx.fillStyle = C.hpBack;
+    ctx.fillRect(c.x - w / 2, y, w, 4);
+    const k = u.hp / maxHp;
+    ctx.fillStyle = k > 0.34 ? C.hp : C.hpLow;
+    ctx.fillRect(c.x - w / 2, y, w * k, 4);
+  }
+}
+
+/** 靶沒有機首：固定靶是靶心；會動的靶機是菱形（速度箭頭照樣畫，看得出往哪飛）。 */
+function drawTargetBody(ctx: CanvasRenderingContext2D, c: Pt, r: number, color: string, mobile: boolean): void {
+  ctx.strokeStyle = color;
+  ctx.fillStyle = '#0b0e12';
+  ctx.lineWidth = 2.5;
+  ctx.beginPath();
+  if (mobile) {
+    ctx.moveTo(c.x, c.y - r * 1.15);
+    ctx.lineTo(c.x + r * 1.15, c.y);
+    ctx.lineTo(c.x, c.y + r * 1.15);
+    ctx.lineTo(c.x - r * 1.15, c.y);
+    ctx.closePath();
+  } else {
+    ctx.arc(c.x, c.y, r, 0, Math.PI * 2);
+  }
+  ctx.fill();
+  ctx.stroke();
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.arc(c.x, c.y, r * 0.5, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.arc(c.x, c.y, r * 0.16, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+/** 打爆的機體留一個殘骸記號：看得出靶原本在哪、打掉了幾個。 */
+function drawWreck(ctx: CanvasRenderingContext2D, cam: Camera, u: Unit): void {
+  const c = toScreen(cam, u.pos);
+  const k = cam.size * 0.28;
+  ctx.strokeStyle = C.wreck;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(c.x - k, c.y - k);
+  ctx.lineTo(c.x + k, c.y + k);
+  ctx.moveTo(c.x + k, c.y - k);
+  ctx.lineTo(c.x - k, c.y + k);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(c.x, c.y, cam.size * 0.42, 0, Math.PI * 2);
+  ctx.stroke();
+}
+
+/** 射界 × 射程：與 core 的 shotCheck 同一條規則，亮的格子就是打得到的格子。 */
+function drawArc(ctx: CanvasRenderingContext2D, map: GameMap, cam: Camera, cells: ArcCell[]): void {
+  const s = cam.size;
+  for (const a of cells) {
+    if (!cellAt(map, a.hex)) continue;
+    const c = toScreen(cam, a.hex);
+    tracePoly(ctx, hexCorners(c.x, c.y, s * 0.96));
+    ctx.fillStyle = a.optimal ? C.arcOptimal : C.arcCell;
+    ctx.fill();
+  }
+}
+
+/** 準星（選中的目標）與每個打得到的目標頭上的命中率。 */
+function drawTargets(ctx: CanvasRenderingContext2D, sc: Scene, tv: TargetView): void {
+  const { cam, now, motion } = sc;
+  const s = cam.size;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'bottom';
+  for (const u of sc.state.units) {
+    if (!u.alive || u.side === 'PLAYER') continue;
+    const c = toScreen(cam, motion.posOf(u.id, u.pos, now));
+    const chance = tv.chance.get(u.id);
+    const sel = tv.selected === u.id;
+    if (sel) {
+      // 四個角的括號
+      const k = s * 0.62;
+      const L = s * 0.24;
+      ctx.strokeStyle = chance !== undefined ? C.reticle : C.reticleDim;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      for (const [sx, sy] of [[-1, -1], [1, -1], [1, 1], [-1, 1]]) {
+        ctx.moveTo(c.x + sx * k, c.y + sy * (k - L));
+        ctx.lineTo(c.x + sx * k, c.y + sy * k);
+        ctx.lineTo(c.x + sx * (k - L), c.y + sy * k);
+      }
+      ctx.stroke();
+    }
+    if (chance !== undefined) {
+      ctx.font = `bold ${Math.round(s * (sel ? 0.46 : 0.38))}px system-ui, sans-serif`;
+      ctx.fillStyle = sel ? C.reticle : C.reticleDim;
+      ctx.fillText(`${chance}%`, c.x, c.y - s * 0.62);
+    }
+  }
+}
+
+/** 曳光（打中直接落在目標上，沒打中擦過去）與飄字。 */
+function drawEffects(ctx: CanvasRenderingContext2D, cam: Camera, fx: Effects, now: number): void {
+  const s = cam.size;
+  for (const t of fx.tracers) {
+    const k = (now - t.start) / t.dur;
+    if (k < 0 || k >= 1) continue;
+    const a = toScreen(cam, t.from);
+    let b = toScreen(cam, t.to);
+    if (!t.hit) {
+      // 沒打中：往旁邊偏一點、再多飛一段
+      const dx = b.x - a.x;
+      const dy = b.y - a.y;
+      const len = Math.hypot(dx, dy) || 1;
+      b = { x: b.x + (dx / len) * s * 1.2 - (dy / len) * s * 0.45, y: b.y + (dy / len) * s * 1.2 + (dx / len) * s * 0.45 };
+    }
+    const p = Math.min(1, k / 0.35);
+    const alpha = k < 0.35 ? 1 : 1 - (k - 0.35) / 0.65;
+    ctx.globalAlpha = alpha;
+    ctx.strokeStyle = t.hit ? C.tracerHit : C.tracerMiss;
+    ctx.lineWidth = 2.5;
+    ctx.beginPath();
+    ctx.moveTo(a.x, a.y);
+    ctx.lineTo(a.x + (b.x - a.x) * p, a.y + (b.y - a.y) * p);
+    ctx.stroke();
+    if (t.hit && p === 1) {
+      ctx.fillStyle = C.tracerHit;
+      ctx.beginPath();
+      ctx.arc(b.x, b.y, s * 0.3 * (1 - k * 0.5), 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  }
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  for (const f of fx.floaters) {
+    const k = (now - f.start) / f.dur;
+    if (k < 0 || k >= 1) continue;
+    const c = toScreen(cam, f.at);
+    ctx.globalAlpha = k < 0.6 ? 1 : 1 - (k - 0.6) / 0.4;
+    ctx.font = `bold ${Math.round(s * 0.5)}px system-ui, sans-serif`;
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = 'rgba(0,0,0,0.7)';
+    // 從命中率標籤上方開始往上飄，不跟標籤疊在一起
+    const y = c.y - s * (1.35 + k * 0.6);
+    ctx.strokeText(f.text, c.x, y);
+    ctx.fillStyle = f.color;
+    ctx.fillText(f.text, c.x, y);
+    ctx.globalAlpha = 1;
+  }
 }
 
 export function draw(ctx: CanvasRenderingContext2D, sc: Scene): void {
@@ -388,13 +576,16 @@ export function draw(ctx: CanvasRenderingContext2D, sc: Scene): void {
   ctx.fillRect(0, 0, viewW, viewH);
   drawTerrain(ctx, state.map, cam, viewW, viewH);
   if (sc.course) drawCourse(ctx, cam, sc.course);
-  drawDots(ctx, cam, sc.trail, C.trail, Math.max(2, cam.size * 0.08));
   const still = !sc.motion.active(sc.now);
+  if (still && sc.arc) drawArc(ctx, state.map, cam, sc.arc);
+  drawDots(ctx, cam, sc.trail, C.trail, Math.max(2, cam.size * 0.08));
   if (still) {
     drawDots(ctx, cam, sc.drift, C.drift, Math.max(2, cam.size * 0.1));
     if (sc.preview) drawPreview(ctx, cam, sc.preview);
   }
+  for (const u of state.units) if (!u.alive) drawWreck(ctx, cam, u);
   for (const u of state.units) if (u.alive) drawUnit(ctx, sc, u);
+  if (sc.targets) drawTargets(ctx, sc, sc.targets);
   const me = state.units[0];
   if (still && sc.hint && me) drawHint(ctx, cam, me, sc.hint);
   if (sc.course && me) drawOffscreen(ctx, sc, sc.course, me);
@@ -405,4 +596,5 @@ export function draw(ctx: CanvasRenderingContext2D, sc: Scene): void {
     ctx.lineWidth = 2;
     ctx.stroke();
   }
+  drawEffects(ctx, cam, sc.fx, sc.now);
 }

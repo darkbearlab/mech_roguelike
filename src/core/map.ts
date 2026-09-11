@@ -9,6 +9,7 @@ import type { Course, CourseHook, HookWhen } from './course';
 import type { Dir, Hex } from './hex';
 import { vec } from './hex';
 import type { Rules } from './rules';
+import type { Script } from './state';
 
 /** 一格。地形目前不影響移動（先無視地形限制），elevation 與 blocksLos 留給日後的視線。 */
 export interface Cell {
@@ -35,6 +36,28 @@ export interface RawCheckpoint {
   hooks?: Record<string, unknown>[];
 }
 
+/**
+ * 地圖檔裡的自動單位（靶）：開局就在場的寫在 units；跑到某個檢查點才出現的，
+ * 用檢查點的 SPAWN 鉤子帶同樣的欄位。patrol 是巡邏點（位移座標），沒有就是原地不動。
+ */
+export interface RawUnit {
+  id?: string;
+  chassis: string;
+  col: number;
+  row: number;
+  facing?: Dir;
+  patrol?: [number, number][];
+}
+
+/** 讀進來、轉成 axial 的自動單位。 */
+export interface UnitSpawn {
+  id?: string;
+  chassis: string;
+  hex: Hex;
+  facing: Dir;
+  script: Script;
+}
+
 export interface RawMap {
   id: string;
   name: string;
@@ -42,6 +65,8 @@ export interface RawMap {
   height: number;
   rows: string[];
   spawns: { player: Spawn; enemies?: Spawn[] };
+  /** 開局就在場的自動單位（靶）。 */
+  units?: RawUnit[];
   /** 有的話這張圖就是一條跑道（見 course.ts）。 */
   course?: { name?: string; chassis?: string; checkpoints: RawCheckpoint[] };
 }
@@ -55,6 +80,7 @@ export interface GameMap {
   cells: Cell[];
   playerSpawn: { hex: Hex; facing: Dir };
   enemySpawns: { hex: Hex; facing: Dir }[];
+  units: UnitSpawn[];
   course: Course | null;
   /** 跑道建議用的機體（新手教學會指定）；介面在沒有其他指定時採用。 */
   chassis: string | null;
@@ -97,6 +123,23 @@ export function loadMap(rules: Rules, raw: RawMap): GameMap {
     }
   });
 
+  /** 自動單位（靶）：開局的 units 與 SPAWN 鉤子共用同一個格式。 */
+  const toSpawn = (u: RawUnit, where: string): UnitSpawn => {
+    if (!rules.chassis[u.chassis]) errors.push(`地圖 ${raw.id}：${where} 的機體 "${u.chassis}" 不存在`);
+    const spawn: UnitSpawn = {
+      chassis: u.chassis,
+      hex: offsetToHex(u.col, u.row),
+      facing: u.facing ?? 3,
+      script: u.patrol && u.patrol.length > 0
+        ? { kind: 'PATROL', points: u.patrol.map(([c, r]) => offsetToHex(c, r)), next: 0 }
+        : { kind: 'IDLE' },
+    };
+    if (u.id !== undefined) spawn.id = u.id;
+    return spawn;
+  };
+  const units = (raw.units ?? []).map((u, i) => toSpawn(u, `units[${i}]`));
+  const spawnPlaces: { where: string; spawn: UnitSpawn }[] = units.map((spawn, i) => ({ where: `units[${i}]`, spawn }));
+
   const course: Course | null = raw.course
     ? {
         name: raw.course.name ?? raw.name,
@@ -114,7 +157,14 @@ export function loadMap(rules: Rules, raw: RawMap): GameMap {
             if (typeof h.type !== 'string' || h.type === '') {
               errors.push(`地圖 ${raw.id}：檢查點 ${i + 1} 的鉤子 ${j + 1} 缺少 type`);
             }
-            return { ...h, when, type: String(h.type) };
+            const hook: CourseHook = { ...h, when, type: String(h.type) };
+            // SPAWN 是 core 自己會處理的鉤子：讀圖時先驗證、轉成 axial，放在 spawn 欄位
+            if (hook.type === 'SPAWN') {
+              const where = `檢查點 ${i + 1} 的 SPAWN 鉤子`;
+              hook.spawn = toSpawn(h as unknown as RawUnit, where);
+              spawnPlaces.push({ where, spawn: hook.spawn as UnitSpawn });
+            }
+            return hook;
           });
           return {
             id: c.id ?? `cp${i + 1}`,
@@ -144,6 +194,7 @@ export function loadMap(rules: Rules, raw: RawMap): GameMap {
     cells,
     playerSpawn: { hex: offsetToHex(raw.spawns.player.col, raw.spawns.player.row), facing: raw.spawns.player.facing },
     enemySpawns: (raw.spawns.enemies ?? []).map((s) => ({ hex: offsetToHex(s.col, s.row), facing: s.facing })),
+    units,
     course,
     chassis,
   };
@@ -155,6 +206,12 @@ export function loadMap(rules: Rules, raw: RawMap): GameMap {
     course?.checkpoints.forEach((c, i) => {
       if (!cellAt(map, c.at)) errors.push(`地圖 ${raw.id}：檢查點 ${i + 1} 的中心在地圖外`);
     });
+    for (const { where, spawn } of spawnPlaces) {
+      if (!cellAt(map, spawn.hex)) errors.push(`地圖 ${raw.id}：${where} 的位置在地圖外`);
+      if (spawn.script.kind === 'PATROL' && spawn.script.points.some((p) => !cellAt(map, p))) {
+        errors.push(`地圖 ${raw.id}：${where} 的巡邏點在地圖外`);
+      }
+    }
   }
   if (errors.length) throw new Error(errors.join('\n'));
   return map;

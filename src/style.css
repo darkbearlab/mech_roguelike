@@ -236,6 +236,11 @@ button {
   font-weight: 700;
 }
 
+#hud-ammo.empty {
+  color: var(--bad);
+  font-weight: 700;
+}
+
 .hud-tools {
   display: flex;
   flex-direction: column;

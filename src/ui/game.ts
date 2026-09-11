@@ -5,13 +5,19 @@
  * 以及從 core 的純函式（checkLegal / resolveMotion）拿預測來畫 ——
  * 預測與實際走的是同一段程式碼，所以畫面上的落點就是按下去之後的落點。
  *
- * 左盤的「點了哪個方向、點了幾下」是介面狀態（還沒確認），放在這裡，不進 GameState。
+ * 左盤的「點了哪個方向、點了幾下」與「選了哪個目標」是介面狀態，放在這裡，不進 GameState。
+ *
+ * 射擊：行動階段自動選命中率最高的目標；點地圖上的目標 = 手動選（並列出命中明細）。
+ * 加速階段的命中率與射界是照「這樣加速之後」的位置算的 —— 靶在玩家行動之後才動，
+ * 所以宣告階段看到的數字就是行動階段按下射擊時的數字（只要不再轉向）。
  */
+import { arcHexes, inOptimal, shotCheck, targetsFor, weaponOf } from '../core/combat';
+import type { ShotCheck } from '../core/combat';
 import { hooksOf } from '../core/course';
 import type { CourseHook } from '../core/course';
 import { applyCommand, checkLegal, newGame, turnPrice } from '../core/engine';
 import type { Hex } from '../core/hex';
-import { hexDist, hexRound } from '../core/hex';
+import { hexDist, hexRound, sameHex } from '../core/hex';
 import type { GameMap } from '../core/map';
 import { cellAt, loadMap } from '../core/map';
 import { accelLegality, driveOf, maxTaps, resolveMotion, worldOf } from '../core/movement';
@@ -20,13 +26,14 @@ import type { Rules, RulesPatch } from '../core/rules';
 import { RULES, withPatch } from '../core/rules';
 import { rawMapById } from '../core/content';
 import type { AccelOrder, Command, GameEvent, GameState, RelDir, Unit } from '../core/state';
-import { activeUnit, currentStep, playerUnit } from '../core/state';
+import { activeUnit, currentStep, playerUnit, unitById } from '../core/state';
 import type { Camera, SafeArea, WorldBounds } from '../render/camera';
 import { computeCamera, effectivePan, hexSizeFor, mapBounds, screenToWorld } from '../render/camera';
+import { Effects } from '../render/effects';
 import type { Pt } from '../render/geometry';
 import { DIR_GLYPH, REL_NAME, axialToWorld, dirAngle, worldToAxial } from '../render/geometry';
 import { Motion } from '../render/motion';
-import type { Preview, RelHint } from '../render/renderer';
+import type { ArcCell, Preview, RelHint, TargetView } from '../render/renderer';
 import { draw } from '../render/renderer';
 import type { Cockpit, PadKey } from './config';
 import { UI } from './config';
@@ -51,10 +58,13 @@ const FUNC_LABEL: Record<PadKey, string> = {
 /** 相對機首方向的箭頭：左盤跟著機首排，所以「前」永遠是 ↑。 */
 const REL_GLYPH = ['↑', '↗', '↘', '↓', '↙', '↖'] as const;
 
-/** 還沒接線的武器鍵：先按 actions.json 顯示成本，但不能按。 */
-const WEAPON_ACTION: Partial<Record<PadKey, keyof Rules['actions']>> = {
-  lock: 'lock', fire: 'fireLight', reload: 'reload', swap: 'swap',
-};
+/** 還沒接線的鍵：先按 actions.json 顯示成本，但不能按（鎖定與電戰一起做；換武器等右側武器面板）。 */
+const UNWIRED: Partial<Record<PadKey, keyof Rules['actions']>> = { lock: 'lock', swap: 'swap' };
+
+/** 理由的短版（按鍵上的小字）：「超出射程（7 格 > 6）」→「超出射程」。 */
+function short(reason: string): string {
+  return reason.split(/[（：]/)[0];
+}
 
 const KIND_TEXT: Record<MotionResult['kind'], string> = {
   COAST: '不加速', START: '起步', PUSH: '加速', VEER60: '轉 60°', VEER120: '轉 120°', BRAKE: '煞車',
@@ -77,6 +87,7 @@ export class Game {
   private cam: Camera = { size: 24, ox: 0, oy: 0 };
 
   private motion = new Motion();
+  private fx = new Effects();
   private hud = new Hud();
   private pads: Pads;
 
@@ -84,6 +95,10 @@ export class Game {
   private picked: Hex | null = null;
   /** 左盤目前的選擇（還沒確認）。 */
   private sel: AccelOrder = null;
+  /** 選中的目標。手動選的留到這一回合結束（或打爆）；自動選的會換成命中率最高的。 */
+  private target: string | null = null;
+  private targetManual = false;
+  private targetRound = 0;
   private trail: Hex[] = [];
   private dirty = true;
   private wasAnimating = false;
@@ -136,7 +151,10 @@ export class Game {
     this.pan = { x: 0, y: 0 };
     this.picked = null;
     this.sel = null;
+    this.target = null;
+    this.targetManual = false;
     this.motion.finish();
+    this.fx.clear();
     this.pads.buildFunc(this.cockpit().pad);
     this.refresh();
     // 開局時第一個檢查點就是目標：它的 ACTIVATE 鉤子在這裡發（之後的由引擎隨事件發出）
@@ -213,23 +231,108 @@ export class Game {
     switch (k) {
       case 'turnL': return this.dispatch({ type: 'TURN', delta: -1 });
       case 'turnR': return this.dispatch({ type: 'TURN', delta: 1 });
+      case 'fire': return this.fire();
+      case 'reload': return this.dispatch({ type: 'RELOAD' });
       case 'cool': return this.dispatch({ type: 'COOL' });
       case 'switchDrive': return this.dispatch({ type: 'SWITCH_DRIVE' });
       case 'wait': return this.dispatch({ type: 'WAIT' });
-      default: this.hud.toast('武器還沒接線', 'info');
+      default: this.hud.toast(`${FUNC_LABEL[k]}還沒接線`, 'info');
     }
   }
 
-  /** 事件 → 動畫與提示。 */
+  private fire(): void {
+    const t = this.selectedTarget();
+    if (!t) {
+      this.hud.toast(this.noTargetReason(), 'warn');
+      return;
+    }
+    this.dispatch({ type: 'FIRE', targetId: t.id });
+  }
+
+  // ---------------------------------------------------------------- 目標
+
+  private selectedTarget(): Unit | null {
+    const t = this.target ? unitById(this.state, this.target) : undefined;
+    return t && t.alive ? t : null;
+  }
+
+  /**
+   * 開火的「那一刻」的自己：行動階段就是現在；加速階段是照左盤目前的選擇移動之後。
+   * 靶在玩家行動之後才動，所以用它算出來的命中率就是行動階段的命中率。
+   */
+  private shooter(): Unit {
+    const u = this.me();
+    if (!this.isDeclare()) return u;
+    const m = this.predict();
+    return { ...u, pos: m.pos, heading: m.heading, speed: m.speed };
+  }
+
+  private checkOn(t: Unit): ShotCheck {
+    return shotCheck(this.state, this.shooter(), t);
+  }
+
+  /**
+   * 選中的目標沒了就清掉；自動選的打不到了就換成命中率最高的。
+   * 手動選的留到這一回合結束 —— 玩家看得到為什麼打不到、可以轉過去打；下一回合回到自動。
+   */
+  private autoTarget(): void {
+    if (!this.selectedTarget()) {
+      this.target = null;
+      this.targetManual = false;
+    }
+    if (this.targetManual && this.state.round !== this.targetRound) this.targetManual = false;
+    if (this.targetManual) return;
+    const cur = this.selectedTarget();
+    if (cur && this.checkOn(cur).ok) return;
+    const best = targetsFor(this.state, this.shooter())[0];
+    if (best) this.target = best.unit.id;
+  }
+
+  private noTargetReason(): string {
+    const u = this.me();
+    const w = weaponOf(this.rules, u);
+    if (!w) return '沒有武器';
+    if (u.ammo === 0) return '沒子彈了：先裝填';
+    if (!this.state.units.some((x) => x.alive && x.side !== u.side)) return '場上沒有目標';
+    return `射界與射程內沒有目標（射程 ${w.range}、射界 ±${w.arcDegrees / 2}°）—— 轉向，或點地圖上的目標看原因`;
+  }
+
+  /** 點目標時的說明：命中率怎麼來的（明細逐項列出），或為什麼打不到。 */
+  private shotText(t: Unit): string {
+    const chk = this.checkOn(t);
+    const c = this.rules.chassis[t.chassis];
+    const head = `${c.name} · 距離 ${chk.distance} · 耐久 ${t.hp}/${c.hp}`;
+    if (!chk.ok) return `${head} —— ${chk.reason}`;
+    const parts = chk.terms.filter((x) => x.value !== 0).map((x) => `${x.label} ${x.value > 0 ? '+' : '−'}${Math.abs(x.value)}`);
+    const raw = chk.terms.reduce((a, x) => a + x.value, 0);
+    const clamp = raw !== chk.chance ? `（夾在 ${this.rules.combat.minHit}–${this.rules.combat.maxHit}）` : '';
+    return `${head} —— 命中 ${chk.chance}%${clamp}：${parts.join('、')}`;
+  }
+
+  private targetCount(): { total: number; killed: number } {
+    const ts = this.state.units.filter((u) => this.rules.chassis[u.chassis].role === 'TARGET');
+    return { total: ts.length, killed: ts.filter((u) => !u.alive).length };
+  }
+
+  /** 有靶的地圖：「 · 擊毀 3／5 · 命中 4／7」；沒有靶就是空字串。 */
+  private scoreText(): string {
+    const n = this.targetCount();
+    if (n.total === 0) return '';
+    const st = this.state.stats;
+    return ` · 擊毀 ${n.killed}／${n.total} · 命中 ${st.hits}／${st.shots}`;
+  }
+
+  /** 事件 → 動畫與提示。開槍之後的演出排在曳光之後（t0 往後推），看得出先後。 */
   private present(events: GameEvent[]): void {
     const now = performance.now();
     const a = UI.animation;
+    let t0 = now;
     for (const e of events) {
       switch (e.type) {
         case 'MOVED': {
           const hexes = e.path.length - 1;
           const bump = events.some((x) => x.type === 'COLLIDED' && x.unitId === e.unitId);
-          if (hexes > 0) this.motion.move(e.unitId, e.from, e.to, now, Math.min(a.maxMoveMs, hexes * a.msPerHex), bump);
+          if (hexes > 0) this.motion.move(e.unitId, e.from, e.to, t0, Math.min(a.maxMoveMs, hexes * a.msPerHex), bump);
           if (e.unitId === 'player' && hexes > 0) {
             this.trail.push(e.from);
             if (this.trail.length > UI.preview.trailLength) this.trail.shift();
@@ -237,8 +340,31 @@ export class Game {
           break;
         }
         case 'TURNED':
-          this.motion.turn(e.unitId, dirAngle(e.from), dirAngle(e.to), now, a.turnMs);
+          this.motion.turn(e.unitId, dirAngle(e.from), dirAngle(e.to), t0, a.turnMs);
           break;
+        case 'FIRED':
+          this.fx.shot(e.from, e.to, e.hit, t0, a.shotMs);
+          this.fx.float(e.to, e.hit ? `−${e.damage}` : '未命中', e.hit ? '#ffe08a' : '#cfd8e3', t0 + a.shotMs * 0.35, a.floatMs);
+          t0 += a.shotMs;
+          break;
+        case 'DESTROYED': {
+          const u = unitById(this.state, e.unitId)!;
+          this.fx.float(u.pos, '擊毀', '#ff6b5a', t0, a.floatMs);
+          if (e.by === 'player') {
+            const n = this.targetCount();
+            this.hud.toast(`💥 擊毀${this.rules.chassis[u.chassis].name}（${n.killed}／${n.total}）`, 'info');
+          }
+          break;
+        }
+        case 'RELOADED':
+          if (e.unitId === 'player') this.hud.toast(`裝填完成：${e.ammo} 發`, 'info');
+          break;
+        case 'SPAWNED': {
+          // 不跳 toast：同一批裡通常還有檢查點的旁白，別蓋掉它
+          const u = unitById(this.state, e.unitId)!;
+          this.fx.float(u.pos, '出現', '#ff6b5a', t0, a.floatMs * 1.5);
+          break;
+        }
         case 'COLLIDED': {
           const what = e.collision.blocker === 'EDGE' ? '地圖邊緣' : '其他機體';
           this.hud.toast(`撞上${what}（${e.collision.speed} 速）— 速度歸零`, 'bad');
@@ -269,9 +395,9 @@ export class Game {
         case 'COURSE_DONE': {
           const best = bestOf(this.mapId, this.chassis);
           const record = recordFinish(this.mapId, this.chassis, e.round);
-          this.hud.toast(record && best !== null
+          this.hud.toast((record && best !== null
             ? `🏁 完賽：${e.round} 回合 —— 新紀錄（原本 ${best}）`
-            : `🏁 完賽：${e.round} 回合`, 'info');
+            : `🏁 完賽：${e.round} 回合`) + this.scoreText(), 'info', 4000);
           break;
         }
         default:
@@ -330,11 +456,13 @@ export class Game {
 
   private refresh(): void {
     this.dirty = true;
+    this.autoTarget();
     const s = this.state;
     const u = this.me();
     const rules = this.rules;
     const c = rules.chassis[u.chassis];
     const drive = rules.drives[u.drive];
+    const weapon = weaponOf(rules, u);
     const declare = this.isDeclare();
     const act = this.isAct();
 
@@ -362,8 +490,11 @@ export class Game {
       facing: u.facing,
       heat: u.heat,
       heatCap: c.heatCap,
-      hotAbove: rules.combat.heatPenaltyAbove,
+      hotAbove: rules.economy.heatWarnAbove,
       shutdown: u.shutdown > 0,
+      weaponName: weapon?.name ?? null,
+      ammo: u.ammo,
+      magazine: weapon?.magazine ?? 0,
       ap: u.ap,
       quota: c.apQuota,
       debt: u.debt,
@@ -383,14 +514,16 @@ export class Game {
     bar.classList.toggle('hidden', !course);
     if (!course || !p) return;
     const best = bestOf(this.mapId, this.chassis);
+    const n = this.targetCount();
     bar.classList.toggle('done', p.done !== null);
     if (p.done !== null) {
       $('course-step').textContent = `🏁 完賽 ${p.done} 回合`;
-      $('course-hint').textContent = `${this.rules.chassis[this.chassis].name}${best !== null ? `・最佳 ${best} 回合` : ''}。按「重跑」再來一次，或在 ⚙ 換機體比較。`;
+      $('course-hint').textContent = `${this.rules.chassis[this.chassis].name}${best !== null ? `・最佳 ${best} 回合` : ''}${this.scoreText()}。按「重跑」再來一次，或在 ⚙ 換機體比較。`;
       return;
     }
     const cp = course.checkpoints[p.next];
-    $('course-step').textContent = `${p.next + 1}／${course.checkpoints.length} ${cp.type === 'STOP' ? '停車' : '通過'}`;
+    $('course-step').textContent = `${p.next + 1}／${course.checkpoints.length} ${cp.type === 'STOP' ? '停車' : '通過'}`
+      + (n.total > 0 ? ` · 🎯${n.killed}／${n.total}` : '');
     $('course-hint').textContent = cp.hint + (best !== null && p.next === 0 ? `（最佳 ${best} 回合）` : '');
   }
 
@@ -411,29 +544,79 @@ export class Game {
   private funcView(k: PadKey): FuncKeyView {
     const s = this.state;
     const u = this.me();
-    const weapon = WEAPON_ACTION[k];
-    if (weapon) {
-      const a = this.rules.actions[weapon];
-      return { key: k, label: FUNC_LABEL[k], sub: costText(a.ap, a.heat), enabled: false, warn: false, reason: '武器還沒接線' };
+    const unwired = UNWIRED[k];
+    if (unwired) {
+      const a = this.rules.actions[unwired];
+      return { key: k, label: FUNC_LABEL[k], sub: costText(a.ap, a.heat), enabled: false, warn: false, reason: `${FUNC_LABEL[k]}還沒接線` };
     }
+    if (k === 'fire') return this.fireView();
+    // 成本一律照資料寫（不從 checkLegal 拿：加速階段的 checkLegal 會以「還沒到行動階段」拒絕，成本是 0）
+    const acts = this.rules.actions;
+    const w = weaponOf(this.rules, u);
     const cmd: Command = k === 'turnL' ? { type: 'TURN', delta: -1 }
       : k === 'turnR' ? { type: 'TURN', delta: 1 }
-        : k === 'cool' ? { type: 'COOL' }
-          : k === 'switchDrive' ? { type: 'SWITCH_DRIVE' }
-            : { type: 'WAIT' };
+        : k === 'reload' ? { type: 'RELOAD' }
+          : k === 'cool' ? { type: 'COOL' }
+            : k === 'switchDrive' ? { type: 'SWITCH_DRIVE' }
+              : { type: 'WAIT' };
     const l = checkLegal(s, cmd);
-    let sub = costText(l.ap, l.heat);
+    let sub: string;
     if (k === 'turnL' || k === 'turnR') {
       const loss = driveOf(this.rules, u).facingTurnSpeedLoss;
-      sub = (turnPrice(this.rules, u).ap === 0 ? '免費' : costText(l.ap, l.heat)) + (loss > 0 ? ` −${loss}速` : '');
-    }
-    if (k === 'wait') sub = '結束回合';
-    if (k === 'switchDrive') {
+      const p = turnPrice(this.rules, u);
+      sub = (p.ap === 0 ? '免費' : costText(p.ap, p.heat)) + (loss > 0 ? ` −${loss}速` : '');
+    } else if (k === 'reload') {
+      // 彈數在儀表上（步槍 5/6），鍵上只寫成本
+      sub = w ? costText(w.reload.ap, w.reload.heat) : '沒有武器';
+    } else if (k === 'cool') {
+      sub = costText(acts.cool.ap, acts.cool.heat);
+    } else if (k === 'switchDrive') {
       const list = this.rules.chassis[u.chassis].drives;
       const next = list[(list.indexOf(u.drive) + 1) % list.length];
-      sub = list.length > 1 ? `→${this.rules.drives[next].name} · ${costText(l.ap, l.heat)}` : '單一驅動';
+      sub = list.length > 1 ? `→${this.rules.drives[next].name} · ${costText(acts.switchDrive.ap, acts.switchDrive.heat)}` : '單一驅動';
+    } else {
+      sub = '結束回合';
     }
     return { key: k, label: FUNC_LABEL[k], sub, enabled: l.ok, warn: l.overdraft > 0, reason: l.reason };
+  }
+
+  /**
+   * 射擊鍵：鍵名後面寫對選中目標的命中率，小字寫成本；
+   * 加速階段顯示的是「這樣加速之後」的命中率（≈）。打不到就在小字寫原因。
+   */
+  private fireView(): FuncKeyView {
+    const base = { key: 'fire' as PadKey, label: FUNC_LABEL.fire };
+    const w = weaponOf(this.rules, this.me());
+    if (!w) return { ...base, sub: '沒有武器', enabled: false, warn: false, reason: '沒有武器' };
+    const t = this.selectedTarget();
+    if (!t) {
+      const reason = this.noTargetReason();
+      return { ...base, sub: short(reason), enabled: false, warn: false, reason };
+    }
+    const chk = this.checkOn(t);
+    if (!chk.ok) return { ...base, sub: short(chk.reason!), enabled: false, warn: false, reason: chk.reason };
+    const l = checkLegal(this.state, { type: 'FIRE', targetId: t.id });
+    return {
+      ...base,
+      label: `${FUNC_LABEL.fire} ${this.isDeclare() ? '≈' : ''}${chk.chance}%`,
+      sub: costText(w.fire.ap, w.fire.heat),
+      enabled: l.ok, warn: l.overdraft > 0, reason: l.reason,
+    };
+  }
+
+  /** 行動（或預測的）位置上，這把武器打得到哪些格子。場上沒有目標就不畫。 */
+  private arcView(): ArcCell[] | null {
+    const w = weaponOf(this.rules, this.me());
+    if (!w || this.state.over || !this.state.units.some((x) => x.alive && x.side !== 'PLAYER')) return null;
+    const v = this.shooter();
+    return arcHexes(w, v.pos, v.facing).map((hex) => ({ hex, optimal: inOptimal(w, hexDist(v.pos, hex)) }));
+  }
+
+  private targetView(): TargetView | null {
+    if (this.state.over) return null;
+    const chance = new Map<string, number>();
+    for (const t of targetsFor(this.state, this.shooter())) chance.set(t.unit.id, t.check.chance);
+    return { selected: this.target, chance };
   }
 
   // ---------------------------------------------------------------- 輸入
@@ -473,12 +656,13 @@ export class Game {
     });
 
     // 桌機測試用的鍵盤（跟著機首）：W 前、E 右前、D 右後、S 後、A 左後、Q 左前、空白 確認；
-    // ← → 轉向、C 散熱、V 切換、Enter 待機
+    // ← → 轉向、F 射擊、R 裝填、Tab 換目標、C 散熱、V 切換、Enter 待機
     const keys: Record<string, () => void> = {
       w: () => this.keyTap(0), e: () => this.keyTap(1), d: () => this.keyTap(2),
       s: () => this.keyTap(3), a: () => this.keyTap(4), q: () => this.keyTap(5),
       ' ': () => (this.isDeclare() ? this.confirm() : this.hud.toast('行動階段：按 Enter（待機）結束這一回合', 'warn')),
       arrowleft: () => this.pressFunc('turnL'), arrowright: () => this.pressFunc('turnR'),
+      f: () => this.keyFunc('fire'), r: () => this.keyFunc('reload'), tab: () => this.cycleTarget(),
       c: () => this.pressFunc('cool'), v: () => this.pressFunc('switchDrive'), enter: () => this.pressFunc('wait'),
     };
     window.addEventListener('keydown', (e) => {
@@ -499,7 +683,38 @@ export class Game {
     this.tap(rel);
   }
 
-  /** 點地圖：顯示那一格的地形與距離（同一把尺）。 */
+  /** 鍵盤走和觸控盤一樣的路：不能按就說為什麼。 */
+  private keyFunc(k: PadKey): void {
+    if (!this.isAct()) {
+      this.hud.toast('先在左盤確認加速：行動在位移之後', 'warn');
+      return;
+    }
+    const v = this.funcView(k);
+    if (!v.enabled) {
+      this.hud.toast(v.reason ?? '不能這樣做', 'warn');
+      return;
+    }
+    this.pressFunc(k);
+  }
+
+  /** Tab：在場上的目標之間輪流（手動選）。 */
+  private cycleTarget(): void {
+    const list = this.state.units.filter((u) => u.alive && u.side !== 'PLAYER');
+    if (list.length === 0) return;
+    const i = list.findIndex((u) => u.id === this.target);
+    this.selectTarget(list[(i + 1) % list.length]);
+  }
+
+  private selectTarget(t: Unit): void {
+    this.target = t.id;
+    this.targetManual = true;
+    this.targetRound = this.state.round;
+    this.picked = null;
+    this.hud.toast(this.shotText(t), 'info', 4500);
+    this.refresh();
+  }
+
+  /** 點地圖：點到目標 = 選它並列出命中明細；點到空地 = 顯示那一格的地形與距離（同一把尺）。 */
   private pick(x: number, y: number): void {
     const w = screenToWorld(this.cam, x, y);
     const a = worldToAxial(w.x, w.y);
@@ -510,6 +725,8 @@ export class Game {
       this.picked = null;
       return;
     }
+    const unit = this.state.units.find((u) => u.alive && u.side !== 'PLAYER' && sameHex(u.pos, hex));
+    if (unit) return this.selectTarget(unit);
     this.picked = hex;
     const t = this.rules.terrain[cell.terrain];
     this.hud.toast(`${t.name} · 距離 ${hexDist(this.me().pos, hex)} · 高度 ${cell.elevation}（地形目前不影響移動）`);
@@ -550,7 +767,7 @@ export class Game {
   }
 
   private loop = (now: number): void => {
-    const animating = this.motion.active(now);
+    const animating = this.motion.active(now) || this.fx.active(now);
     // 動畫剛結束的那一幀一定要再畫一次：速度箭頭、預測、滑行都只在靜止時畫
     if (this.wasAnimating && !animating) this.dirty = true;
     this.wasAnimating = animating;
@@ -587,6 +804,7 @@ export class Game {
       draw(this.ctx, {
         state: this.state, cam: this.cam, viewW: this.viewW, viewH: this.viewH, safe: this.safe, now,
         motion: this.motion, preview, hint, drift, trail: this.trail, picked: this.picked, course,
+        arc: this.arcView(), targets: this.targetView(), fx: this.fx,
       });
     }
     requestAnimationFrame(this.loop);

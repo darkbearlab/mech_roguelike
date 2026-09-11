@@ -70,7 +70,7 @@ export function passiveCool(rules: Rules, u: Unit): void {
   u.heat = Math.max(0, u.heat - rules.chassis[u.chassis].heatPassive);
 }
 
-/** 熱量是否已進入命中懲罰區（> 70%）。第 5 步的命中公式與介面的熱量條共用。 */
+/** 熱量是否超過警戒線（儀表變色、bot 想散熱）。目前不影響命中。 */
 export function isHot(rules: Rules, u: Unit): boolean {
-  return u.heat > rules.combat.heatPenaltyAbove * rules.chassis[u.chassis].heatCap;
+  return u.heat > rules.economy.heatWarnAbove * rules.chassis[u.chassis].heatCap;
 }

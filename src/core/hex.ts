@@ -116,9 +116,29 @@ export function relDir(a: Dir, b: Dir): Dir {
   return ((((b - a) % 6) + 6) % 6) as Dir;
 }
 
-/** 前方三面：朝向本身與左右各一面。第 3 步起決定武器射界。 */
+/** 前方三面：朝向本身與左右各一面。 */
 export function inFrontArc(facing: Dir, d: Dir): boolean {
   return turnSteps(facing, d) <= 1;
+}
+
+/**
+ * 平面座標（flat-top，六角半徑 = 1）。**只拿來算角度**（射界），不拿來量距離 ——
+ * 距離一律用 hexDist。render/ 的像素換算用的是同一條公式。
+ */
+export function cartesian(h: Hex): { x: number; y: number } {
+  return { x: 1.5 * h.q, y: Math.sqrt(3) * (h.r + h.q / 2) };
+}
+
+/**
+ * 從 from 看 to，偏離方向 facing 幾度（0..180）。射界判定與「角度影響命中」用。
+ * from 與 to 同格回傳 0。
+ */
+export function offAxisDegrees(from: Hex, facing: Dir, to: Hex): number {
+  const d = cartesian(sub(to, from));
+  if (d.x === 0 && d.y === 0) return 0;
+  const f = cartesian(DIR_VEC[facing]);
+  const cos = (d.x * f.x + d.y * f.y) / (Math.hypot(d.x, d.y) * Math.hypot(f.x, f.y));
+  return (Math.acos(Math.min(1, Math.max(-1, cos))) * 180) / Math.PI;
 }
 
 /**

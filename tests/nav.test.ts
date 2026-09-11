@@ -8,7 +8,7 @@ import type { Hex } from '../src/core/hex';
 import { loadMap } from '../src/core/map';
 import { accelLegality } from '../src/core/movement';
 import { arrived, planAccel } from '../src/core/nav';
-import { RULES } from '../src/core/rules';
+import { RULES, pilotChassis } from '../src/core/rules';
 import type { GameState } from '../src/core/state';
 import { flatMap, game, player } from './helpers';
 
@@ -71,7 +71,7 @@ describe('bot（可重現的自動對局）', () => {
 
   it('情境：四台試驗機都跑得完基礎跑道，檢查點依序通過，而且結果可重現', () => {
     const map = loadMap(RULES, rawMapById('track_01')!);
-    for (const id of Object.keys(RULES.chassis)) {
+    for (const { id } of pilotChassis(RULES)) {
       const r = runCourse(RULES, map, id);
       expect(r.finished, id).toBe(true);
       expect(r.splits).toHaveLength(11);
@@ -79,5 +79,20 @@ describe('bot（可重現的自動對局）', () => {
       expect(runCourse(RULES, map, id)).toEqual(r);
     }
     expect(() => runCourse(RULES, loadMap(RULES, rawMapById('proving_ground')!), 'jt1')).toThrow('沒有跑道');
+  });
+
+  it('情境：射擊場 —— 四台都跑得完、會開槍也打得爆靶；靶機由檢查點生出來；同一個種子結果相同', () => {
+    const map = loadMap(RULES, rawMapById('range_01')!);
+    expect(map.units.map((u) => u.id)).toEqual(['stopL', 'stopR', 'laneR1', 'laneL1', 'laneR2']);
+    for (const { id } of pilotChassis(RULES)) {
+      const r = runCourse(RULES, map, id, 120, 3);
+      expect(r.finished, id).toBe(true);
+      expect(r.shots, id).toBeGreaterThan(0);
+      expect(r.hits).toBeLessThanOrEqual(r.shots);
+      expect(r.kills, id).toBeGreaterThan(0);
+      // 5 個固定靶 + 跑到第 4 個檢查點時生出來的靶機
+      expect(r.targets).toBe(6);
+      expect(runCourse(RULES, map, id, 120, 3)).toEqual(r);
+    }
   });
 });

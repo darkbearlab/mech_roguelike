@@ -104,7 +104,7 @@ describe('跑道地圖', () => {
     raw.course = {
       checkpoints: [
         { type: 'PASS', col: 4, row: 1, hooks: [{ type: 'MESSAGE', text: '嗨' }] },
-        { id: 'goal', type: 'STOP', col: 4, row: 3, hooks: [{ when: 'ACTIVATE', type: 'SPAWN', unit: 'x' }] },
+        { id: 'goal', type: 'STOP', col: 4, row: 3, hooks: [{ when: 'ACTIVATE', type: 'CUSTOM', unit: 'x' }] },
       ],
     };
     const m = loadMap(RULES, raw);
@@ -112,7 +112,7 @@ describe('跑道地圖', () => {
       name: '測試場',
       checkpoints: [
         { id: 'cp1', radius: 1, hint: '', hooks: [{ when: 'REACH', type: 'MESSAGE', text: '嗨' }] },
-        { id: 'goal', hooks: [{ when: 'ACTIVATE', type: 'SPAWN', unit: 'x' }] },
+        { id: 'goal', hooks: [{ when: 'ACTIVATE', type: 'CUSTOM', unit: 'x' }] },
       ],
     });
     expect(m.chassis).toBeNull();

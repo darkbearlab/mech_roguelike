@@ -184,7 +184,7 @@ describe('引擎：射擊與裝填', () => {
     expect(player(r.state)).toMatchObject({ ammo: 5, heat: 3 });   // +6 熱、世界階段 −3
     expect(r.state.round).toBe(2);
     expect(unit(r.state, 't').hp).toBe(10);
-    expect(r.state.stats).toEqual({ shots: 1, hits: 1, kills: 0 });
+    expect(r.state.stats).toEqual({ shots: 1, hits: 1, kills: 0, enemyShots: 0, enemyHits: 0 });
   });
 
   it('打爆：hp 歸零、DESTROYED、不再擋路也不再行動；靶不算敵人，打光也不會結束', () => {
@@ -203,7 +203,7 @@ describe('引擎：射擊與裝填', () => {
     const r = run(range({ q: 10, r: 2 }, { rules: never }), [COAST, fire]);
     expect(r.events).toContainEqual(expect.objectContaining({ type: 'FIRED', hit: false, damage: 0 }));
     expect(unit(r.state, 't').hp).toBe(20);
-    expect(r.state.stats).toEqual({ shots: 1, hits: 0, kills: 0 });
+    expect(r.state.stats).toEqual({ shots: 1, hits: 0, kills: 0, enemyShots: 0, enemyHits: 0 });
   });
 
   it('命中擲骰走種子亂數：同一個種子、同一串指令 → 同一個結果', () => {

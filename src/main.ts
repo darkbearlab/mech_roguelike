@@ -10,6 +10,7 @@ import { loadPrefs } from './ui/prefs';
  *   ?seed=123        固定亂數種子（命中擲骰用）
  *   ?map=track_01    指定地圖（track_01 基礎跑道 / range_01 射擊場 / proving_ground 試驗場）
  *   ?chassis=jt1     指定機體（tk1 履帶 / wk1 步行 / jt1 噴射 / hy1 步行＋噴射）
+ *   ?rival=tk1       決鬥場的對手（同上四台）
  */
 const params = new URLSearchParams(location.search);
 const prefs = loadPrefs();
@@ -35,9 +36,15 @@ function readChassis(mapId: string): string {
   return 'wk1';
 }
 
+/** 決鬥對手：網址 → 上次選的 → 地圖寫的（null）。 */
+function readRival(): string | null {
+  for (const id of [params.get('rival'), prefs.rival]) if (id && RULES.chassis[id]?.role === 'PILOT') return id;
+  return null;
+}
+
 const seed = readSeed();
 const mapId = readMap();
-const game = new Game({ seed, chassis: readChassis(mapId), mapId });
+const game = new Game({ seed, chassis: readChassis(mapId), mapId, rival: readRival() });
 // index.html 的開機失敗說明：走到這裡就代表成功了
 document.getElementById('boot-fail')?.remove();
 

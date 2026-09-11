@@ -1,5 +1,5 @@
 /**
- * 介面的便利設定：上次選的地圖與機體、每條跑道每台機體的最佳紀錄。
+ * 介面的便利設定：上次選的地圖、機體與決鬥對手，每張圖每台機體的最佳紀錄。
  * 只存在這支手機的 localStorage；存不了（私密瀏覽等）就當作沒有，遊戲照常。
  */
 
@@ -9,6 +9,8 @@ const BEST = 'mech.best.v1';
 export interface Prefs {
   map?: string;
   chassis?: string;
+  /** 決鬥場的對手機體。 */
+  rival?: string;
 }
 
 function read<T>(key: string, fallback: T): T {

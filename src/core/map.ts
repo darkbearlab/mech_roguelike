@@ -37,8 +37,11 @@ export interface RawCheckpoint {
 }
 
 /**
- * 地圖檔裡的自動單位（靶）：開局就在場的寫在 units；跑到某個檢查點才出現的，
- * 用檢查點的 SPAWN 鉤子帶同樣的欄位。patrol 是巡邏點（位移座標），沒有就是原地不動。
+ * 地圖檔裡的自動單位：開局就在場的寫在 units；跑到某個檢查點才出現的，
+ * 用檢查點的 SPAWN 鉤子帶同樣的欄位。
+ * - patrol：巡邏點（位移座標）
+ * - ai: 'DUEL'：敵機，跟玩家用同一套規則移動、射擊（ai.ts）
+ * 兩個都沒有就是原地不動。
  */
 export interface RawUnit {
   id?: string;
@@ -47,6 +50,7 @@ export interface RawUnit {
   row: number;
   facing?: Dir;
   patrol?: [number, number][];
+  ai?: string;
 }
 
 /** 讀進來、轉成 axial 的自動單位。 */
@@ -69,6 +73,8 @@ export interface RawMap {
   units?: RawUnit[];
   /** 有的話這張圖就是一條跑道（見 course.ts）。 */
   course?: { name?: string; chassis?: string; checkpoints: RawCheckpoint[] };
+  /** 沒有跑道的地圖（決鬥場之類）在畫面上方那一行顯示的說明。 */
+  brief?: string;
 }
 
 export interface GameMap {
@@ -84,6 +90,7 @@ export interface GameMap {
   course: Course | null;
   /** 跑道建議用的機體（新手教學會指定）；介面在沒有其他指定時採用。 */
   chassis: string | null;
+  brief: string | null;
 }
 
 /** odd-q 位移座標 → axial。 */
@@ -123,16 +130,17 @@ export function loadMap(rules: Rules, raw: RawMap): GameMap {
     }
   });
 
-  /** 自動單位（靶）：開局的 units 與 SPAWN 鉤子共用同一個格式。 */
+  /** 自動單位（靶、敵機）：開局的 units 與 SPAWN 鉤子共用同一個格式。 */
   const toSpawn = (u: RawUnit, where: string): UnitSpawn => {
     if (!rules.chassis[u.chassis]) errors.push(`地圖 ${raw.id}：${where} 的機體 "${u.chassis}" 不存在`);
+    if (u.ai !== undefined && u.ai !== 'DUEL') errors.push(`地圖 ${raw.id}：${where} 的 ai 只能是 DUEL（現在是 "${u.ai}"）`);
     const spawn: UnitSpawn = {
       chassis: u.chassis,
       hex: offsetToHex(u.col, u.row),
       facing: u.facing ?? 3,
       script: u.patrol && u.patrol.length > 0
         ? { kind: 'PATROL', points: u.patrol.map(([c, r]) => offsetToHex(c, r)), next: 0 }
-        : { kind: 'IDLE' },
+        : u.ai === 'DUEL' ? { kind: 'DUEL' } : { kind: 'IDLE' },
     };
     if (u.id !== undefined) spawn.id = u.id;
     return spawn;
@@ -197,6 +205,7 @@ export function loadMap(rules: Rules, raw: RawMap): GameMap {
     units,
     course,
     chassis,
+    brief: raw.brief ?? null,
   };
 
   if (errors.length === 0) {
@@ -215,6 +224,20 @@ export function loadMap(rules: Rules, raw: RawMap): GameMap {
   }
   if (errors.length) throw new Error(errors.join('\n'));
   return map;
+}
+
+/** 敵機（DUEL）的 id，依地圖上的順序。 */
+export function duelists(map: GameMap): string[] {
+  return map.units.filter((u) => u.script.kind === 'DUEL').map((u) => u.id ?? u.chassis);
+}
+
+/**
+ * 換掉地圖上某台自動單位的機體（決鬥場換對手用）。回傳新的地圖，不改動傳入的。
+ * 找不到這個 id、或機體不存在就原樣回傳。
+ */
+export function withUnitChassis(rules: Rules, map: GameMap, unitId: string, chassis: string): GameMap {
+  if (!rules.chassis[chassis]) return map;
+  return { ...map, units: map.units.map((u) => ((u.id ?? u.chassis) === unitId ? { ...u, chassis } : u)) };
 }
 
 /** 地圖外回傳 null。 */

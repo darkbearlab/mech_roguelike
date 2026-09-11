@@ -1,11 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { pilotTurn } from '../bot/pilot';
 import { runCourse } from '../bot/course';
+import { runDuel } from '../bot/duel';
 import { runOne } from '../bot/match';
 import { rawMapById } from '../src/core/content';
 import { hexDist } from '../src/core/hex';
 import type { Hex } from '../src/core/hex';
-import { loadMap } from '../src/core/map';
+import { duelists, loadMap } from '../src/core/map';
 import { accelLegality } from '../src/core/movement';
 import { arrived, planAccel } from '../src/core/nav';
 import { RULES, pilotChassis } from '../src/core/rules';
@@ -79,6 +80,23 @@ describe('bot（可重現的自動對局）', () => {
       expect(runCourse(RULES, map, id)).toEqual(r);
     }
     expect(() => runCourse(RULES, loadMap(RULES, rawMapById('proving_ground')!), 'jt1')).toThrow('沒有跑道');
+  });
+
+  it('情境：決鬥場 —— 兩邊同一顆 AI 會分出勝負；換對手、同一個種子結果相同；也數得出每回合按了幾下', () => {
+    const map = loadMap(RULES, rawMapById('duel_01')!);
+    expect(duelists(map)).toEqual(['rival']);
+    const r = runDuel(RULES, map, 'wk1', 'tk1', 2);
+    expect(r.winner).not.toBe('DRAW');
+    expect(r.rival).toBe('tk1');
+    expect(r.shots + r.enemyShots).toBeGreaterThan(0);
+    expect(r.hits).toBeLessThanOrEqual(r.shots);
+    expect(r.winner === 'PLAYER' ? r.rivalHpLeft : r.hpLeft).toBe(0);
+    // 每回合至少按一下確認
+    expect(r.inputs).toBeGreaterThanOrEqual(r.turns);
+    expect(runDuel(RULES, map, 'wk1', 'tk1', 2)).toEqual(r);
+    // 回合上限到了還沒分出來 = 和局
+    expect(runDuel(RULES, map, 'wk1', 'tk1', 2, 2)).toMatchObject({ winner: 'DRAW', turns: 2 });
+    expect(() => runDuel(RULES, loadMap(RULES, rawMapById('track_01')!), 'wk1', 'tk1')).toThrow('沒有敵機');
   });
 
   it('情境：射擊場 —— 四台都跑得完、會開槍也打得爆靶；靶機由檢查點生出來；同一個種子結果相同', () => {

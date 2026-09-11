@@ -43,6 +43,9 @@ export interface TuningHost {
   setPatch(p: RulesPatch): void;
   setChassis(id: string): void;
   setMap(id: string): void;
+  /** 決鬥場的對手機體；不是決鬥場 = null。 */
+  rival(): string | null;
+  setRival(id: string): void;
   restart(): void;
 }
 
@@ -145,7 +148,8 @@ export class TuningPanel {
     // 地圖：跑道（情境測試）或試驗場（自由移動）
     const maps = h('div', 'tune-chassis');
     for (const m of RAW_MAPS) {
-      const b = h('button', m.id === this.host.map() ? 'on' : '', m.course ? `🏁 ${m.name}` : m.name);
+      const icon = m.course ? '🏁 ' : m.units?.some((u) => u.ai === 'DUEL') ? '⚔ ' : '';
+      const b = h('button', m.id === this.host.map() ? 'on' : '', icon + m.name);
       b.type = 'button';
       b.addEventListener('click', () => {
         this.host.setMap(m.id);
@@ -155,6 +159,9 @@ export class TuningPanel {
     }
     body.append(maps);
 
+    // 決鬥場有兩排機體：你開的、對手
+    const rival = this.host.rival();
+    if (rival !== null) body.append(h('p', 'tune-profile', '你開的'));
     const pick = h('div', 'tune-chassis');
     for (const ch of pilotChassis(rules)) {
       const b = h('button', ch.id === chassisId ? 'on' : '', ch.name);
@@ -166,6 +173,22 @@ export class TuningPanel {
       pick.append(b);
     }
     body.append(pick);
+
+    // 決鬥場：對手也從四台試驗機裡挑
+    if (rival !== null) {
+      body.append(h('p', 'tune-profile', '對手'));
+      const rv = h('div', 'tune-chassis');
+      for (const ch of pilotChassis(rules)) {
+        const b = h('button', ch.id === rival ? 'on' : '', ch.name);
+        b.type = 'button';
+        b.addEventListener('click', () => {
+          this.host.setRival(ch.id);
+          this.render();
+        });
+        rv.append(b);
+      }
+      body.append(rv);
+    }
 
     for (const d of c.drives) {
       const drive = rules.drives[d];
@@ -257,6 +280,7 @@ export class TuningPanel {
       + '點另一個方向 = 改選；同一方向點超過上限 = 歸零。地圖上機體周圍的數字是每個方向能點幾下。'
       + '確認後機體移動，換右盤行動；AP 用完或按「待機」就推進回合。'
       + '射擊：自動選命中率最高的目標；點地圖上的目標 = 改選（這一回合有效）並列出命中明細。亮的扇形是射界 × 射程，較亮那圈是有利射程。'
+      + '決鬥場：你頭上的紅字「⚠」是對手打你的命中率（用它現在的位置與速度估）。'
       + '點地圖看地形與距離，拖曳平移，◎ 回中。'
       + '桌機：W 前、E 右前、D 右後、S 後、A 左後、Q 左前、空白 確認；← → 轉向、F 射擊、R 裝填、Tab 換目標、C 散熱、V 切換、Enter 待機。'));
 

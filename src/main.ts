@@ -1,15 +1,18 @@
 import './style.css';
+import { RAW_MAPS, rawMapById } from './core/content';
 import { RULES } from './core/rules';
 import { Game } from './ui/game';
 import { BUILD_ID } from './ui/build';
+import { loadPrefs } from './ui/prefs';
 
 /**
- * 網址參數：
- *   ?seed=123      固定亂數種子（第 2 步還沒有東西會抽亂數，先把管線接好）
- *   ?chassis=jt1   指定機體（tk1 履帶 / wk1 步行 / jt1 噴射 / hy1 步行＋噴射）
- *   ?map=<id>      指定地圖
+ * 網址參數（優先於上次的選擇）：
+ *   ?seed=123        固定亂數種子（目前還沒有東西會抽亂數，先把管線接好）
+ *   ?map=track_01    指定地圖（track_01 基礎跑道 / proving_ground 試驗場）
+ *   ?chassis=jt1     指定機體（tk1 履帶 / wk1 步行 / jt1 噴射 / hy1 步行＋噴射）
  */
 const params = new URLSearchParams(location.search);
+const prefs = loadPrefs();
 
 function readSeed(): number {
   const raw = params.get('seed');
@@ -17,14 +20,23 @@ function readSeed(): number {
   return Date.now() >>> 0;
 }
 
-function readChassis(): string {
-  const raw = params.get('chassis');
-  if (raw && RULES.chassis[raw]) return raw;
+/** 地圖：網址 → 上次選的 → 第一張（跑道）。 */
+function readMap(): string {
+  for (const id of [params.get('map'), prefs.map]) if (id && rawMapById(id)) return id;
+  return RAW_MAPS[0].id;
+}
+
+/** 機體：網址 → 上次選的 → 跑道建議的 → 步行。 */
+function readChassis(mapId: string): string {
+  for (const id of [params.get('chassis'), prefs.chassis, rawMapById(mapId)?.course?.chassis]) {
+    if (id && RULES.chassis[id]) return id;
+  }
   return 'wk1';
 }
 
 const seed = readSeed();
-const game = new Game({ seed, chassis: readChassis(), mapId: params.get('map') ?? 'proving_ground' });
+const mapId = readMap();
+const game = new Game({ seed, chassis: readChassis(mapId), mapId });
 // index.html 的開機失敗說明：走到這裡就代表成功了
 document.getElementById('boot-fail')?.remove();
 

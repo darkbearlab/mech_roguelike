@@ -5,6 +5,7 @@
  * 奇數欄往下錯半格 —— 這樣在文字編輯器裡改圖時，看到的形狀大致就是遊戲裡的形狀。
  * 讀進來之後一律轉成 axial (q, r)，core/ 其他地方不再碰位移座標。
  */
+import type { Course, CourseHook, HookWhen } from './course';
 import type { Dir, Hex } from './hex';
 import { vec } from './hex';
 import type { Rules } from './rules';
@@ -22,6 +23,18 @@ export interface Spawn {
   facing: Dir;
 }
 
+/** 地圖檔裡的檢查點：位移座標的中心格 + 半徑，外加提示與事件鉤子。 */
+export interface RawCheckpoint {
+  id?: string;
+  type: string;
+  col: number;
+  row: number;
+  radius?: number;
+  hint?: string;
+  /** 事件鉤子：{ when?: 'REACH' | 'ACTIVATE', type: string, ...其他欄位 }。 */
+  hooks?: Record<string, unknown>[];
+}
+
 export interface RawMap {
   id: string;
   name: string;
@@ -29,6 +42,8 @@ export interface RawMap {
   height: number;
   rows: string[];
   spawns: { player: Spawn; enemies?: Spawn[] };
+  /** 有的話這張圖就是一條跑道（見 course.ts）。 */
+  course?: { name?: string; chassis?: string; checkpoints: RawCheckpoint[] };
 }
 
 export interface GameMap {
@@ -40,6 +55,9 @@ export interface GameMap {
   cells: Cell[];
   playerSpawn: { hex: Hex; facing: Dir };
   enemySpawns: { hex: Hex; facing: Dir }[];
+  course: Course | null;
+  /** 跑道建議用的機體（新手教學會指定）；介面在沒有其他指定時採用。 */
+  chassis: string | null;
 }
 
 /** odd-q 位移座標 → axial。 */
@@ -79,6 +97,45 @@ export function loadMap(rules: Rules, raw: RawMap): GameMap {
     }
   });
 
+  const course: Course | null = raw.course
+    ? {
+        name: raw.course.name ?? raw.name,
+        checkpoints: raw.course.checkpoints.map((c, i) => {
+          if (c.type !== 'PASS' && c.type !== 'STOP') {
+            errors.push(`地圖 ${raw.id}：檢查點 ${i + 1} 的 type 必須是 PASS 或 STOP（現在是 "${c.type}"）`);
+          }
+          const radius = c.radius ?? 1;
+          if (!Number.isInteger(radius) || radius < 0) errors.push(`地圖 ${raw.id}：檢查點 ${i + 1} 的 radius 必須是 ≥ 0 的整數`);
+          const hooks: CourseHook[] = (c.hooks ?? []).map((h, j) => {
+            const when = (h.when ?? 'REACH') as HookWhen;
+            if (when !== 'REACH' && when !== 'ACTIVATE') {
+              errors.push(`地圖 ${raw.id}：檢查點 ${i + 1} 的鉤子 ${j + 1} 的 when 必須是 REACH 或 ACTIVATE`);
+            }
+            if (typeof h.type !== 'string' || h.type === '') {
+              errors.push(`地圖 ${raw.id}：檢查點 ${i + 1} 的鉤子 ${j + 1} 缺少 type`);
+            }
+            return { ...h, when, type: String(h.type) };
+          });
+          return {
+            id: c.id ?? `cp${i + 1}`,
+            type: c.type as 'PASS' | 'STOP',
+            at: offsetToHex(c.col, c.row),
+            radius,
+            hint: c.hint ?? '',
+            hooks,
+          };
+        }),
+      }
+    : null;
+  if (course && course.checkpoints.length === 0) errors.push(`地圖 ${raw.id}：跑道至少要有一個檢查點`);
+  const ids = new Set<string>();
+  for (const c of course?.checkpoints ?? []) {
+    if (ids.has(c.id)) errors.push(`地圖 ${raw.id}：檢查點 id "${c.id}" 重複`);
+    ids.add(c.id);
+  }
+  const chassis = raw.course?.chassis ?? null;
+  if (chassis !== null && !rules.chassis[chassis]) errors.push(`地圖 ${raw.id}：跑道指定的機體 "${chassis}" 不存在`);
+
   const map: GameMap = {
     id: raw.id,
     name: raw.name,
@@ -87,12 +144,17 @@ export function loadMap(rules: Rules, raw: RawMap): GameMap {
     cells,
     playerSpawn: { hex: offsetToHex(raw.spawns.player.col, raw.spawns.player.row), facing: raw.spawns.player.facing },
     enemySpawns: (raw.spawns.enemies ?? []).map((s) => ({ hex: offsetToHex(s.col, s.row), facing: s.facing })),
+    course,
+    chassis,
   };
 
   if (errors.length === 0) {
     for (const s of [map.playerSpawn, ...map.enemySpawns]) {
       if (!cellAt(map, s.hex)) errors.push(`地圖 ${raw.id}：出生點 (${s.hex.q},${s.hex.r}) 在地圖外`);
     }
+    course?.checkpoints.forEach((c, i) => {
+      if (!cellAt(map, c.at)) errors.push(`地圖 ${raw.id}：檢查點 ${i + 1} 的中心在地圖外`);
+    });
   }
   if (errors.length) throw new Error(errors.join('\n'));
   return map;

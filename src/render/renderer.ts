@@ -4,12 +4,14 @@
  * 圖層由下而上：地形 → 軌跡 → 巡航預測 → 這回合的預測路徑與落點 → 左盤方向提示 → 單位 → 點選的格子。
  * 機體永遠畫在格子中心（只有位移動畫的途中會在兩格之間）。
  */
+import type { Checkpoint } from '../core/course';
+import { checkpointHexes } from '../core/course';
 import type { Dir, Hex } from '../core/hex';
-import { DIR_VEC, add, rotate, scale } from '../core/hex';
+import { DIR_VEC, add, hexDist, rotate, scale } from '../core/hex';
 import type { GameMap } from '../core/map';
 import { allHexes, cellAt } from '../core/map';
 import type { GameState, Unit } from '../core/state';
-import type { Camera } from './camera';
+import type { Camera, SafeArea } from './camera';
 import { worldToScreen } from './camera';
 import type { Pt } from './geometry';
 import { axialToWorld, dirAngle, hexCorners } from './geometry';
@@ -34,11 +36,20 @@ export interface RelHint {
   sel: { rel: number; taps: number } | null;
 }
 
+/** 跑道：檢查點、下一個要過的是第幾個、起點（畫路線用）。 */
+export interface CourseView {
+  checkpoints: Checkpoint[];
+  next: number;
+  start: Hex;
+}
+
 export interface Scene {
   state: GameState;
   cam: Camera;
   viewW: number;
   viewH: number;
+  /** 沒被儀表與觸控盤蓋住的那一段（畫面外指示箭頭要貼著它的邊）。 */
+  safe: SafeArea;
   now: number;
   motion: Motion;
   preview: Preview | null;
@@ -47,6 +58,7 @@ export interface Scene {
   drift: Hex[];
   trail: Hex[];
   picked: Hex | null;
+  course: CourseView | null;
 }
 
 const C = {
@@ -74,6 +86,14 @@ const C = {
   trail: 'rgba(79,214,255,0.3)',
   drift: 'rgba(255,209,102,0.45)',
   picked: 'rgba(255,255,255,0.7)',
+  track: '#1d252d',
+  trackEdge: 'rgba(255,255,255,0.09)',
+  // 檢查點：綠色（青色是機體、琥珀色是運動，綠色是目標）
+  cp: '#7dff9a',
+  cpFill: 'rgba(125,255,154,0.16)',
+  cpDim: 'rgba(125,255,154,0.35)',
+  cpDone: 'rgba(255,255,255,0.12)',
+  cpLine: 'rgba(125,255,154,0.22)',
 } as const;
 
 function tracePoly(ctx: CanvasRenderingContext2D, pts: Pt[]): void {
@@ -127,6 +147,13 @@ function drawTerrain(ctx: CanvasRenderingContext2D, map: GameMap, cam: Camera, v
         ctx.fillStyle = C.ridge;
         ctx.fill();
         ctx.strokeStyle = C.ridgeTop;
+        ctx.lineWidth = 1;
+        ctx.stroke();
+        break;
+      case 'track':
+        ctx.fillStyle = C.track;
+        ctx.fill();
+        ctx.strokeStyle = C.trackEdge;
         ctx.lineWidth = 1;
         ctx.stroke();
         break;
@@ -212,6 +239,75 @@ function drawPreview(ctx: CanvasRenderingContext2D, cam: Camera, p: Preview): vo
   }
 }
 
+/** 跑道：路線虛線、每個檢查點的區域與編號。已過的淡掉、下一個最亮。 */
+function drawCourse(ctx: CanvasRenderingContext2D, cam: Camera, cv: CourseView): void {
+  const s = cam.size;
+  // 路線：起點 → 各檢查點中心
+  const pts = [cv.start, ...cv.checkpoints.map((c) => c.at)].map((h) => toScreen(cam, h));
+  ctx.strokeStyle = C.cpLine;
+  ctx.lineWidth = 2;
+  ctx.setLineDash([6, 6]);
+  ctx.beginPath();
+  pts.forEach((p, i) => (i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y)));
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  cv.checkpoints.forEach((cp, i) => {
+    const state = i < cv.next ? 'done' : i === cv.next ? 'next' : 'later';
+    for (const h of checkpointHexes(cp)) {
+      const c = toScreen(cam, h);
+      tracePoly(ctx, hexCorners(c.x, c.y, s * 0.9));
+      if (state === 'next') {
+        ctx.fillStyle = C.cpFill;
+        ctx.fill();
+      }
+      ctx.strokeStyle = state === 'done' ? C.cpDone : state === 'next' ? C.cp : C.cpDim;
+      ctx.lineWidth = state === 'next' ? 2 : 1;
+      ctx.stroke();
+    }
+    const c = toScreen(cam, cp.at);
+    ctx.fillStyle = state === 'done' ? C.cpDone : state === 'next' ? C.cp : C.cpDim;
+    ctx.font = `bold ${Math.round(s * (state === 'next' ? 0.55 : 0.42))}px system-ui, sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(state === 'done' ? '✓' : cp.type === 'STOP' ? `${i + 1}停` : String(i + 1), c.x, c.y);
+  });
+}
+
+/** 下一個檢查點在畫面外時，在可視區邊緣畫一個指向它的箭頭，標上編號與距離。 */
+function drawOffscreen(ctx: CanvasRenderingContext2D, sc: Scene, cv: CourseView, me: Unit): void {
+  const cp = cv.checkpoints[cv.next];
+  if (!cp) return;
+  const p = toScreen(sc.cam, cp.at);
+  const m = 22;
+  const top = sc.safe.top + m;
+  const bottom = sc.safe.bottom - m;
+  if (p.x >= m && p.x <= sc.viewW - m && p.y >= top && p.y <= bottom) return;
+  // 從可視區中心往目標拉一條線，和可視區邊框的交點就是箭頭位置
+  const cx = sc.viewW / 2;
+  const cy = (top + bottom) / 2;
+  const dx = p.x - cx;
+  const dy = p.y - cy;
+  const k = Math.min(
+    dx !== 0 ? (sc.viewW / 2 - m) / Math.abs(dx) : Infinity,
+    dy !== 0 ? (bottom - top) / 2 / Math.abs(dy) : Infinity,
+  );
+  const ax = cx + dx * k;
+  const ay = cy + dy * k;
+  const ang = Math.atan2(dy, dx);
+  ctx.fillStyle = C.cp;
+  ctx.beginPath();
+  ctx.moveTo(ax + Math.cos(ang) * 12, ay + Math.sin(ang) * 12);
+  ctx.lineTo(ax + Math.cos(ang + 2.5) * 10, ay + Math.sin(ang + 2.5) * 10);
+  ctx.lineTo(ax + Math.cos(ang - 2.5) * 10, ay + Math.sin(ang - 2.5) * 10);
+  ctx.closePath();
+  ctx.fill();
+  ctx.font = 'bold 12px system-ui, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(`${cv.next + 1} · ${hexDist(me.pos, cp.at)}格`, ax - Math.cos(ang) * 22, ay - Math.sin(ang) * 16);
+}
+
 /** 機體周圍六格標出「往這個方向最多能點幾下」—— 左盤跟著機首排，這個讓人對得上地圖。 */
 function drawHint(ctx: CanvasRenderingContext2D, cam: Camera, u: Unit, h: RelHint): void {
   const s = cam.size;
@@ -291,6 +387,7 @@ export function draw(ctx: CanvasRenderingContext2D, sc: Scene): void {
   ctx.fillStyle = C.bg;
   ctx.fillRect(0, 0, viewW, viewH);
   drawTerrain(ctx, state.map, cam, viewW, viewH);
+  if (sc.course) drawCourse(ctx, cam, sc.course);
   drawDots(ctx, cam, sc.trail, C.trail, Math.max(2, cam.size * 0.08));
   const still = !sc.motion.active(sc.now);
   if (still) {
@@ -300,6 +397,7 @@ export function draw(ctx: CanvasRenderingContext2D, sc: Scene): void {
   for (const u of state.units) if (u.alive) drawUnit(ctx, sc, u);
   const me = state.units[0];
   if (still && sc.hint && me) drawHint(ctx, cam, me, sc.hint);
+  if (sc.course && me) drawOffscreen(ctx, sc, sc.course, me);
   if (sc.picked) {
     const c = toScreen(cam, sc.picked);
     tracePoly(ctx, hexCorners(c.x, c.y, cam.size * 0.95));

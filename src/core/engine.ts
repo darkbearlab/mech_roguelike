@@ -15,6 +15,8 @@
  *   - 透支：行動照常結算，然後結束，不夠的部分從下一個階段的配額扣
  *   - 過熱停機
  */
+import { advanceCourse, hooksOf, newProgress } from './course';
+import type { HookWhen } from './course';
 import type { Dir, Hex } from './hex';
 import { rotate } from './hex';
 import type { GameMap } from './map';
@@ -91,6 +93,7 @@ export function newGame(rules: Rules, map: GameMap, setup: Setup): GameState {
     steps: [],
     cursor: -1,
     rng: createRng(setup.seed),
+    course: map.course ? newProgress() : null,
     over: null,
   };
   proceed(s, []);
@@ -314,6 +317,29 @@ function move(s: GameState, u: Unit, order: AccelOrder, ev: GameEvent[]): void {
   ev.push({ type: 'MOVED', unitId: u.id, order, from, to: r.pos, heading: r.heading, speed: r.speed, path: r.path });
   if (r.collision) ev.push({ type: 'COLLIDED', unitId: u.id, collision: r.collision });
   heat(s, u, r.heat, ev);
+  // s.course 只在地圖有跑道時才建立，所以兩者同時存在
+  if (u.side === 'PLAYER' && s.course) {
+    const course = s.map.course!;
+    const { progress, passed } = advanceCourse(course, s.course, r.path, u.speed, s.round);
+    s.course = progress;
+    const hook = (index: number, when: HookWhen): void => {
+      for (const h of hooksOf(course, index, when)) {
+        ev.push({ type: 'COURSE_HOOK', index, checkpointId: course.checkpoints[index].id, hook: h, round: s.round });
+      }
+    };
+    // 每個檢查點的 ACTIVATE 與 REACH 各發一次、依序發 —— 一次衝過好幾個也一樣
+    // （第一個檢查點的 ACTIVATE 在開局時，由呼叫端用 hooksOf(course, 0, 'ACTIVATE') 取）
+    for (const i of passed) {
+      ev.push({ type: 'CHECKPOINT', index: i, id: course.checkpoints[i].id, round: s.round });
+      hook(i, 'REACH');
+      hook(i + 1, 'ACTIVATE');
+    }
+    // 跑完就當場結束，不必等到世界階段
+    if (progress.done !== null) {
+      ev.push({ type: 'COURSE_DONE', round: progress.done });
+      s.over = judge(s);
+    }
+  }
 }
 
 /**
@@ -355,11 +381,12 @@ function world(s: GameState): void {
 }
 
 /**
- * 勝敗判定。玩家陣亡 → 敵方勝；開局有敵人且全滅 → 玩家勝。
- * 開局就沒有敵人（手感測試）是自由移動，永遠不結束。
+ * 勝敗判定。玩家陣亡 → 敵方勝；跑完跑道、或開局有敵人且全滅 → 玩家勝。
+ * 沒有跑道也沒有敵人（試驗場）是自由移動，永遠不結束。
  */
 export function judge(s: GameState): GameState['over'] {
   if (!s.units.some((u) => u.side === 'PLAYER' && u.alive)) return { winner: 'ENEMY' };
+  if (s.course?.done != null) return { winner: 'PLAYER' };
   const enemies = s.units.filter((u) => u.side === 'ENEMY');
   if (enemies.length > 0 && enemies.every((u) => !u.alive)) return { winner: 'PLAYER' };
   return null;

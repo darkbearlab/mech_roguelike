@@ -5,6 +5,7 @@
  * 「複製調整值」把 patch 印成 JSON —— 貼回來，就能寫進 data/。
  * 面板本身不碰 core/ 的任何狀態；它只產生一份新的 Rules，由 Game 換上。
  */
+import { RAW_MAPS } from '../core/content';
 import { driveProfile } from '../core/movement';
 import type { DriveProfile } from '../core/movement';
 import type { Rules, RulesPatch } from '../core/rules';
@@ -36,9 +37,11 @@ export interface TuningHost {
   rules(): Rules;
   base(): Rules;
   chassis(): string;
+  map(): string;
   patch(): RulesPatch;
   setPatch(p: RulesPatch): void;
   setChassis(id: string): void;
+  setMap(id: string): void;
   restart(): void;
 }
 
@@ -134,6 +137,19 @@ export class TuningPanel {
     close.addEventListener('click', () => this.close());
     head.append(close);
     body.append(head);
+
+    // 地圖：跑道（情境測試）或試驗場（自由移動）
+    const maps = h('div', 'tune-chassis');
+    for (const m of RAW_MAPS) {
+      const b = h('button', m.id === this.host.map() ? 'on' : '', m.course ? `🏁 ${m.name}` : m.name);
+      b.type = 'button';
+      b.addEventListener('click', () => {
+        this.host.setMap(m.id);
+        this.render();
+      });
+      maps.append(b);
+    }
+    body.append(maps);
 
     const pick = h('div', 'tune-chassis');
     for (const ch of Object.values(rules.chassis)) {

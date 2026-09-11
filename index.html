@@ -21,6 +21,7 @@
       <canvas id="map"></canvas>
 
       <header id="hud">
+        <div class="hud-top">
         <canvas id="dial" aria-label="姿態儀：機首是朝向，黃色箭頭是速度"></canvas>
         <div class="hud-grid">
           <div class="hud-line">
@@ -45,6 +46,12 @@
         <div class="hud-tools">
           <button id="btn-tune" type="button" title="調參">⚙</button>
           <button id="btn-recenter" type="button" class="hidden" title="鏡頭回到機體">◎</button>
+        </div>
+        </div>
+        <!-- 跑道：下一個檢查點與這一步的提示（之後的新手教學就是這一行）。沒有跑道的地圖不顯示。 -->
+        <div id="hud-course" class="course-bar hidden">
+          <div class="course-text"><b id="course-step"></b> <span id="course-hint"></span></div>
+          <button id="btn-course-restart" type="button" title="回到起點重跑">重跑</button>
         </div>
       </header>
 
